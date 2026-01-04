@@ -1,0 +1,54 @@
+# --- System Files ---
+.DS_Store
+Thumbs.db
+*.log
+
+# --- Frontend (React Native / Expo) ---
+node_modules/
+.expo/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Backend (Python / FastAPI) ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Environment Secrets (CRITICAL) ---
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# --- Databases ---
+*.db
+*.sqlite3
+
+# --- Editor folders ---
+.vscode/
+.idea/
+*.swp
+*.swo
