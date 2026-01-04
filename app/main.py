@@ -132,15 +132,12 @@ def create_comment(
     new_comment = models.Comment(
         content=comment.content,
         post_id=comment.post_id,
-        user_id=current_user.id
+        user_id=current_user.id,
+        parent_id=comment.parent_id # Save the parent_id if it exists
     )
     db.add(new_comment)
     db.commit()
     db.refresh(new_comment)
-
-    # DELETE OR COMMENT OUT THIS LINE:
-    # new_comment.username = current_user.username  <-- This was causing the crash
-
     return new_comment
 
 @app.post("/posts/{post_id}/like")

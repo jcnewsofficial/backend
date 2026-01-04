@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON, DateTime
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from .database import Base
 
@@ -36,11 +36,17 @@ class Comment(Base):
     post_id = Column(Integer, ForeignKey("posts.id"))
     user_id = Column(Integer, ForeignKey("users.id"))
 
+    # NEW: Self-referencing relationship
+    parent_id = Column(Integer, ForeignKey("comments.id"), nullable=True)
+
     # server_default=func.now() tells Postgres to handle the time itself
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
     author = relationship("User", back_populates="comments")
     post = relationship("Post", back_populates="comments")
+
+    # NEW: Relationship to fetch replies
+    replies = relationship("Comment", backref=backref('parent', remote_side=[id]), cascade="all, delete-orphan")
 
     @property
     def username(self) -> str:

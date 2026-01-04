@@ -9,16 +9,19 @@ class CommentBase(BaseModel):
 
 class CommentCreate(CommentBase):
     post_id: int
+    parent_id: Optional[int] = None # Added this to allow replies
 
 class Comment(CommentBase):
     id: int
     user_id: int
     post_id: int
+    parent_id: Optional[int] = None
     timestamp: Optional[datetime] = None
-    username: str # This name MUST match the @property name in models.py
+    username: str
+    replies: List['Comment'] = [] # This allows nesting
 
     class Config:
-        from_attributes = True # This allows Pydantic to read properties from SQLAlchemy models
+        from_attributes = True
 
 # --- POST (NEWS) SCHEMAS ---
 
