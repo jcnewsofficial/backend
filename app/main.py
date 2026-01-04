@@ -3,11 +3,20 @@ from .scraper import auto_parse_news
 from sqlalchemy.orm import Session
 from typing import List
 from . import models, schemas, database
+from fastapi.middleware.cors import CORSMiddleware
 
 # Create the database tables
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI(title="JC News Backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Allows all origins (for development)
+    allow_credentials=True,
+    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"], # Allows all headers
+)
 
 @app.post("/auto-scrape", status_code=201)
 async def create_automated_post(url: str, category: str, db: Session = Depends(database.get_db)):
