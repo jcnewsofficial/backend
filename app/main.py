@@ -66,16 +66,17 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 # --- AUTH ENDPOINTS ---
 
 @app.post("/register", response_model=schemas.User)
-def register_user(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
+def register(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
+    # Check if user exists
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    hashed_password = get_password_hash(user.password)
+    # Hash and save
     new_user = models.User(
-        username=user.username,
         email=user.email,
-        hashed_password=hashed_password
+        username=user.username,
+        hashed_password=get_password_hash(user.password)
     )
     db.add(new_user)
     db.commit()
@@ -86,7 +87,7 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(database.get_d
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(database.get_db)):
     user = db.query(models.User).filter(models.User.email == form_data.username).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     access_token = create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer"}
