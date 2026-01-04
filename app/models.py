@@ -28,6 +28,8 @@ class Post(Base):
     # Relationships
     comments = relationship("Comment", back_populates="post", cascade="all, delete-orphan")
     likes = relationship("Like", back_populates="post", cascade="all, delete-orphan")
+    views = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class Comment(Base):
     __tablename__ = "comments"

@@ -41,6 +41,8 @@ class Post(PostBase):
     like_count: int = 0
     dislike_count: int = 0
     user_vote: Optional[int] = 0 # 1 if current user liked, -1 if disliked,
+    created_at: datetime # ADD THIS
+    views: int           # ADD THIS
 
     class Config:
         from_attributes = True

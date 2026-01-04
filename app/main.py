@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Response, status, Header
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from typing import List, Optional
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
@@ -112,36 +112,83 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @app.get("/feed", response_model=List[schemas.Post])
 def read_posts(
-    category: Optional[str] = None, # Add this query parameter
+    sort: str = "newest",           # newest, liked, viewed
+    category: Optional[str] = None, # All, Tech, Politics, etc.
+    time: str = "all",              # 24h, week, month, year, all
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
-    # 1. Start the query with eager loading
+    # 1. Start the query with eager loading for comments and authors
     query = db.query(models.Post).options(
         joinedload(models.Post.comments).joinedload(models.Comment.author)
     )
 
-    # 2. Apply category filter if it's provided and not "All"
+    # 2. Apply Category Filter
     if category and category != "All":
         query = query.filter(models.Post.category.ilike(category))
 
-    # 3. Execute query with ordering
-    posts = query.order_by(desc(models.Post.id)).all()
+    # 3. Apply Time Range Filter (Only for Liked or Viewed)
+    # This prevents old viral posts from staying at the top forever
+    if sort in ["liked", "viewed"] and time != "all":
+        now = datetime.utcnow()
+        if time == "24h":
+            start_date = now - timedelta(hours=24)
+        elif time == "week":
+            start_date = now - timedelta(weeks=1)
+        elif time == "month":
+            start_date = now - timedelta(days=30)
+        elif time == "year":
+            start_date = now - timedelta(days=365)
+        else:
+            start_date = None
 
-    # 4. Process counts and user-specific votes
+        if start_date:
+            query = query.filter(models.Post.created_at >= start_date)
+
+    # 4. Apply Sorting Logic
+    if sort == "liked":
+        # 1. Subquery to count positive votes
+        like_counts = db.query(
+            models.Like.post_id,
+            func.count(models.Like.id).label('total_likes')
+        ).filter(models.Like.vote_type == 1).group_by(models.Like.post_id).subquery()
+
+        # 2. Join the subquery
+        query = query.outerjoin(like_counts, models.Post.id == like_counts.c.post_id)
+
+        # 3. Use COALESCE to treat NULL as 0
+        # This ensures 1 like > 0 likes (instead of NULL breaking the sort)
+        query = query.order_by(
+            desc(func.coalesce(like_counts.c.total_likes, 0)),
+            desc(models.Post.created_at)
+        )
+
+    elif sort == "viewed":
+        # Assumes you have a 'views' column in your Post model
+        query = query.order_by(desc(models.Post.views), desc(models.Post.created_at))
+
+    else:
+        # Default: Newest (Sorting by ID is often the same as Date but faster)
+        query = query.order_by(desc(models.Post.created_at))
+
+    # 5. Execute Query
+    posts = query.all()
+
+    # 6. Post-process counts and user-specific votes
     for post in posts:
-        # Total counts
+        # Get count of Likes (1)
         post.like_count = db.query(models.Like).filter(
             models.Like.post_id == post.id,
             models.Like.vote_type == 1
         ).count()
 
+        # Get count of Dislikes (-1)
         post.dislike_count = db.query(models.Like).filter(
             models.Like.post_id == post.id,
             models.Like.vote_type == -1
         ).count()
 
-        # User-specific vote
+        # Check if the logged-in user has voted on this specific post
         post.user_vote = 0
         if current_user:
             vote = db.query(models.Like).filter(
