@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON, DateTime, UniqueConstraint
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from .database import Base
@@ -59,7 +59,10 @@ class Like(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     post_id = Column(Integer, ForeignKey("posts.id"))
+    vote_type = Column(Integer)
 
-    # Connections
-    user = relationship("User", back_populates="likes")
-    post = relationship("Post", back_populates="likes")
+    # ADD THESE RELATIONSHIPS
+    user = relationship("User")
+    post = relationship("Post")
+
+    __table_args__ = (UniqueConstraint('user_id', 'post_id', name='_user_post_uc'),)

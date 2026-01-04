@@ -38,6 +38,9 @@ class PostCreate(PostBase):
 class Post(PostBase):
     id: int
     comments: List[Comment] = [] # Tell Pydantic to include the list of comments
+    like_count: int = 0
+    dislike_count: int = 0
+    user_vote: Optional[int] = 0 # 1 if current user liked, -1 if disliked,
 
     class Config:
         from_attributes = True

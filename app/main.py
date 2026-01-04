@@ -10,6 +10,8 @@ from passlib.context import CryptContext
 from . import models, schemas, database
 from .scraper import auto_parse_news
 from fastapi.middleware.cors import CORSMiddleware
+from .database import engine, get_db
+from typing import Optional
 
 # --- SECURITY CONFIGURATION ---
 SECRET_KEY = "DEVELOPMENT_SECRET_KEY_CHANGE_THIS_IN_PRODUCTION"
@@ -24,9 +26,15 @@ models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI(title="JC News Backend")
 
+origins = [
+    "http://localhost:8081",
+    "http://192.168.1.99:8081",
+    "https://miic_pc-anonymous-8081.exp.direct", # Add this specific URL from your logs
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # For development, using "*" is easiest to stop CORS errors
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -94,14 +102,51 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 # --- NEWS & FEED ENDPOINTS ---
 
-@app.get("/feed", response_model=List[schemas.Post])
-def read_posts(skip: int = 0, limit: int = 20, db: Session = Depends(database.get_db)):
-    posts = db.query(models.Post).options(
-        # This is the "Magic" line that fetches the user data for the comments
-        joinedload(models.Post.comments).joinedload(models.Comment.author)
-    ).order_by(models.Post.id.desc()).offset(skip).limit(limit).all()
+def get_optional_current_user(db: Session = Depends(get_db)):
+    # This is a placeholder logic
+    # In a real app, you'd check the Authorization header/token here
+    try:
+        # If you have auth logic, call it here
+        # user = get_current_user(token, db)
+        # return user
+        return None
+    except:
+        return None
 
-    return posts # No loop needed!
+@app.get("/feed", response_model=List[schemas.Post])
+def read_posts(db: Session = Depends(database.get_db), current_user: Optional[models.User] = Depends(get_optional_current_user)):
+    try:
+        # Just get the posts and comments.
+        # Do NOT try to joinedload(models.Like.user) here.
+        posts = db.query(models.Post).options(
+            joinedload(models.Post.comments).joinedload(models.Comment.author)
+        ).all()
+
+        for post in posts:
+            # We count by filtering the ID, which doesn't require a 'user' relationship
+            post.like_count = db.query(models.Like).filter(
+                models.Like.post_id == post.id,
+                models.Like.vote_type == 1
+            ).count()
+
+            post.dislike_count = db.query(models.Like).filter(
+                models.Like.post_id == post.id,
+                models.Like.vote_type == -1
+            ).count()
+
+            post.user_vote = 0
+            if current_user:
+                vote = db.query(models.Like).filter(
+                    models.Like.post_id == post.id,
+                    models.Like.user_id == current_user.id
+                ).first()
+                if vote:
+                    post.user_vote = vote.vote_type
+
+        return posts
+    except Exception as e:
+        print(f"BACKEND ERROR: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auto-scrape", status_code=201)
 async def create_automated_post(url: str, category: str, db: Session = Depends(database.get_db)):
@@ -161,3 +206,26 @@ def like_post(
     db.add(new_like)
     db.commit()
     return {"message": "Liked"}
+
+@app.post("/posts/{post_id}/vote")
+def vote_post(post_id: int, vote_type: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # 1. Check if vote already exists
+    existing_vote = db.query(models.Like).filter(
+        models.Like.post_id == post_id,
+        models.Like.user_id == current_user.id
+    ).first()
+
+    if existing_vote:
+        if existing_vote.vote_type == vote_type:
+            # User clicked the same button again -> Undo/Delete
+            db.delete(existing_vote)
+        else:
+            # User switched from like to dislike or vice versa -> Update
+            existing_vote.vote_type = vote_type
+    else:
+        # New vote
+        new_vote = models.Like(user_id=current_user.id, post_id=post_id, vote_type=vote_type)
+        db.add(new_vote)
+
+    db.commit()
+    return {"status": "success"}
