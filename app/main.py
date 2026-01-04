@@ -111,18 +111,37 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 # --- NEWS & FEED ENDPOINTS ---
 
 @app.get("/feed", response_model=List[schemas.Post])
-def read_posts(db: Session = Depends(get_db), current_user: Optional[models.User] = Depends(get_optional_current_user)):
-    # Eager load comments and their authors
-    posts = db.query(models.Post).options(
+def read_posts(
+    category: Optional[str] = None, # Add this query parameter
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_optional_current_user)
+):
+    # 1. Start the query with eager loading
+    query = db.query(models.Post).options(
         joinedload(models.Post.comments).joinedload(models.Comment.author)
-    ).order_by(desc(models.Post.id)).all()
+    )
 
+    # 2. Apply category filter if it's provided and not "All"
+    if category and category != "All":
+        query = query.filter(models.Post.category.ilike(category))
+
+    # 3. Execute query with ordering
+    posts = query.order_by(desc(models.Post.id)).all()
+
+    # 4. Process counts and user-specific votes
     for post in posts:
-        # 1. Total counts
-        post.like_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == 1).count()
-        post.dislike_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == -1).count()
+        # Total counts
+        post.like_count = db.query(models.Like).filter(
+            models.Like.post_id == post.id,
+            models.Like.vote_type == 1
+        ).count()
 
-        # 2. User-specific vote
+        post.dislike_count = db.query(models.Like).filter(
+            models.Like.post_id == post.id,
+            models.Like.vote_type == -1
+        ).count()
+
+        # User-specific vote
         post.user_vote = 0
         if current_user:
             vote = db.query(models.Like).filter(
