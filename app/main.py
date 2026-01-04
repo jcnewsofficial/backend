@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Response, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
 from typing import List
 from datetime import datetime, timedelta
@@ -96,7 +96,14 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @app.get("/feed", response_model=List[schemas.Post])
 def read_posts(skip: int = 0, limit: int = 20, db: Session = Depends(database.get_db)):
-    return db.query(models.Post).order_by(desc(models.Post.id)).offset(skip).limit(limit).all()
+    # .options(joinedload(models.Post.comments)) tells Postgres to grab comments too
+    posts = db.query(models.Post)\
+        .options(joinedload(models.Post.comments))\
+        .order_by(desc(models.Post.id))\
+        .offset(skip)\
+        .limit(limit)\
+        .all()
+    return posts
 
 @app.post("/auto-scrape", status_code=201)
 async def create_automated_post(url: str, category: str, db: Session = Depends(database.get_db)):
@@ -122,7 +129,7 @@ async def create_automated_post(url: str, category: str, db: Session = Depends(d
 def create_comment(
     comment: schemas.CommentCreate,
     db: Session = Depends(database.get_db),
-    current_user: models.User = Depends(get_current_user) # Now requires login
+    current_user: models.User = Depends(get_current_user)
 ):
     new_comment = models.Comment(
         content=comment.content,
@@ -131,7 +138,11 @@ def create_comment(
     )
     db.add(new_comment)
     db.commit()
-    db.refresh(new_comment)
+    db.refresh(new_comment) # This refreshes the object from DB
+
+    # Manually attach the username for the response
+    new_comment.username = current_user.username
+
     return new_comment
 
 @app.post("/posts/{post_id}/like")
