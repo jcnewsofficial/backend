@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from . import models, schemas, database
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import desc # Add this import at the top
 
 # Create the database tables
 models.Base.metadata.create_all(bind=database.engine)
@@ -66,7 +67,8 @@ def delete_post(post_id: int, db: Session = Depends(database.get_db)):
 # --- NEWS FEED ENDPOINT ---
 @app.get("/feed", response_model=List[schemas.Post])
 def read_posts(skip: int = 0, limit: int = 20, db: Session = Depends(database.get_db)):
-    posts = db.query(models.Post).offset(skip).limit(limit).all()
+    # Add .order_by(desc(models.Post.id)) to the query
+    posts = db.query(models.Post).order_by(desc(models.Post.id)).offset(skip).limit(limit).all()
     return posts
 
 # --- COMMENTING ENDPOINT ---
