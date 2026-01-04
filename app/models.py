@@ -33,14 +33,20 @@ class Comment(Base):
     __tablename__ = "comments"
     id = Column(Integer, primary_key=True, index=True)
     content = Column(String)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now())
-
     post_id = Column(Integer, ForeignKey("posts.id"))
     user_id = Column(Integer, ForeignKey("users.id"))
 
-    # Connections back to Post and User
-    post = relationship("Post", back_populates="comments")
+    # server_default=func.now() tells Postgres to handle the time itself
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
     author = relationship("User", back_populates="comments")
+    post = relationship("Post", back_populates="comments")
+
+    @property
+    def username(self) -> str:
+        if self.author:
+            return self.author.username
+        return "User"
 
 class Like(Base):
     __tablename__ = "likes"

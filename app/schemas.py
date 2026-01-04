@@ -14,30 +14,11 @@ class Comment(CommentBase):
     id: int
     user_id: int
     post_id: int
-    timestamp: datetime
-    username: Optional[str] = None # Make it optional first
+    timestamp: Optional[datetime] = None
+    username: str # This name MUST match the @property name in models.py
 
-    @field_validator('username', mode='before')
-    @classmethod
-    def get_username_from_author(cls, v, info):
-        # 'v' is the input value (which is None initially)
-        # 'info.data' or the object itself might contain the relationship
-        # However, the most reliable way in Pydantic v2 with from_attributes is this:
-        return v
-
-    # Use this helper to allow Pydantic to "reach into" the author object
-    model_config = {
-        "from_attributes": True
-    }
-
-    # Add a property to grab the username from the relationship
-    @classmethod
-    def from_orm(cls, obj):
-        item = super().from_orm(obj)
-        if hasattr(obj, 'author') and obj.author:
-            item.username = obj.author.username
-        return item
-
+    class Config:
+        from_attributes = True # This allows Pydantic to read properties from SQLAlchemy models
 
 # --- POST (NEWS) SCHEMAS ---
 

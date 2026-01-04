@@ -96,14 +96,12 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @app.get("/feed", response_model=List[schemas.Post])
 def read_posts(skip: int = 0, limit: int = 20, db: Session = Depends(database.get_db)):
-    # .options(joinedload(models.Post.comments)) tells Postgres to grab comments too
-    posts = db.query(models.Post)\
-        .options(joinedload(models.Post.comments))\
-        .order_by(desc(models.Post.id))\
-        .offset(skip)\
-        .limit(limit)\
-        .all()
-    return posts
+    posts = db.query(models.Post).options(
+        # This is the "Magic" line that fetches the user data for the comments
+        joinedload(models.Post.comments).joinedload(models.Comment.author)
+    ).order_by(models.Post.id.desc()).offset(skip).limit(limit).all()
+
+    return posts # No loop needed!
 
 @app.post("/auto-scrape", status_code=201)
 async def create_automated_post(url: str, category: str, db: Session = Depends(database.get_db)):
@@ -138,10 +136,10 @@ def create_comment(
     )
     db.add(new_comment)
     db.commit()
-    db.refresh(new_comment) # This refreshes the object from DB
+    db.refresh(new_comment)
 
-    # Manually attach the username for the response
-    new_comment.username = current_user.username
+    # DELETE OR COMMENT OUT THIS LINE:
+    # new_comment.username = current_user.username  <-- This was causing the crash
 
     return new_comment
 
