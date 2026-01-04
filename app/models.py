@@ -18,10 +18,14 @@ class Post(Base):
     # Storing the 3 bullet points as a JSON list
     bullet_points = Column(JSON) 
     source_url = Column(String)
+    comments = relationship("Comment", back_populates="post", cascade="all, delete-orphan")
 
 class Comment(Base):
     __tablename__ = "comments"
     id = Column(Integer, primary_key=True, index=True)
-    content = Column(Text)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    content = Column(String)
     post_id = Column(Integer, ForeignKey("posts.id"))
+
+    # 2. THIS IS THE MISSING PIECE:
+    # It must match the back_populates name used in the Post class
+    post = relationship("Post", back_populates="comments")

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Response, status
 from .scraper import auto_parse_news
 from sqlalchemy.orm import Session
 from typing import List
@@ -42,6 +42,26 @@ async def create_automated_post(url: str, category: str, db: Session = Depends(d
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_post(post_id: int, db: Session = Depends(database.get_db)):
+    # 1. Look for the post
+    post_query = db.query(models.Post).filter(models.Post.id == post_id)
+    post = post_query.first()
+
+    # 2. If it doesn't exist, tell the user
+    if post is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Post with id: {post_id} does not exist"
+        )
+
+    # 3. Delete the post and commit changes
+    post_query.delete(synchronize_session=False)
+    db.commit()
+
+    # 204 No Content is the standard response for a successful delete
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 # --- NEWS FEED ENDPOINT ---
 @app.get("/feed", response_model=List[schemas.Post])
