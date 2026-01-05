@@ -209,6 +209,10 @@ async def create_automated_post(url: str, category: str, db: Session = Depends(g
             image_url=scraped_data.get("image_url", "https://example.com/default.jpg"),
             category=category,
             bullet_points=scraped_data["bullets"],
+            # Ensure the database field 'url' is populated
+            url=url,
+            # You can keep source_url if your model has both,
+            # but 'url' is what the feed query was crashing on.
             source_url=url
         )
         db.add(new_post)
@@ -216,6 +220,7 @@ async def create_automated_post(url: str, category: str, db: Session = Depends(g
         db.refresh(new_post)
         return {"status": "success", "post_id": new_post.id}
     except Exception as e:
+        db.rollback() # Good practice to rollback on failure
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- SOCIAL ENDPOINTS ---

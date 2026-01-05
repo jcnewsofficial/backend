@@ -24,6 +24,7 @@ class Post(Base):
     category = Column(String)
     bullet_points = Column(JSON) # List of strings
     source_url = Column(String)
+    url = Column(String)
 
     # Relationships
     comments = relationship("Comment", back_populates="post", cascade="all, delete-orphan")
