@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException, Response, status, Header
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
@@ -6,11 +7,15 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-
 from . import models, schemas, database
 from .scraper import auto_parse_news
 from fastapi.middleware.cors import CORSMiddleware
-from .database import engine, get_db
+from .database import engine, get_db, SessionLocal
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+from .models import User
+
 
 # --- SECURITY CONFIGURATION ---
 SECRET_KEY = "DEVELOPMENT_SECRET_KEY_CHANGE_THIS_IN_PRODUCTION"
@@ -79,6 +84,98 @@ def get_optional_current_user(token: Optional[str] = Depends(oauth2_scheme), db:
     except JWTError:
         return None
     return None
+
+def get_cbc_links():
+    url = "https://www.cbc.ca/news"
+    # Modern headers to avoid being blocked
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        links = []
+        # CBC uses a specific class for their primary story links
+        # We look for all anchor tags
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+
+            # Pattern check:
+            # 1. Must contain /news/
+            # 2. Usually ends with a pattern like 1.7034234 (the ID)
+            # 3. We ignore links to category sections (like just /news/world)
+            if "/news/" in href and any(char.isdigit() for char in href):
+                # Clean up relative URLs
+                if href.startswith('/'):
+                    full_url = f"https://www.cbc.ca{href}"
+                elif href.startswith('http'):
+                    full_url = href
+                else:
+                    continue
+
+                # Filter out duplicates and non-story links (like 'top-news' index)
+                if full_url not in links and "desktop-top-navigation" not in full_url:
+                    links.append(full_url)
+
+        print(f"Found {len(links)} potential articles.")
+        return links[:5]
+
+    except Exception as e:
+        print(f"Error fetching CBC links: {e}")
+        return []
+
+def extract_category_from_url(url):
+    try:
+        # 1. Parse the URL
+        path = urlparse(url).path  # Result: "/news/world/some-story-1.123"
+
+        # 2. Split by slashes and remove empty strings
+        parts = [p for p in path.split('/') if p]
+
+        # 3. Logic for CBC structure:
+        # parts[0] is usually 'news'
+        # parts[1] is usually the category (world, canada, politics, etc.)
+        if len(parts) >= 2 and parts[0] == 'news':
+            category = parts[1]
+            return category.capitalize() # Returns "World", "Canada", etc.
+
+        return "General" # Fallback if structure is different
+    except Exception:
+        return "General"
+
+async def scrape_cbc_periodically():
+    while True:
+        db = SessionLocal()
+        try:
+            article_links = get_cbc_links()
+            for link in article_links:
+                exists = db.query(models.Post).filter(models.Post.url == link).first()
+                if exists: continue
+                print(link)
+                # PARSE CATEGORY AUTOMATICALLY
+                auto_category = extract_category_from_url(link)
+                scraped_data = auto_parse_news(link)
+                if scraped_data:
+                    new_post = models.Post(
+                        headline=scraped_data["headline"],
+                        image_url=scraped_data.get("image_url"),
+                        category=auto_category, # <--- USED HERE
+                        bullet_points=scraped_data["bullets"],
+                        url=link,
+                        source_url=link
+                    )
+                    db.add(new_post)
+                    db.commit()
+        finally:
+            db.close()
+        await asyncio.sleep(600)
+
+# Start the task when FastAPI starts
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(scrape_cbc_periodically())
 
 # --- AUTH ENDPOINTS ---
 
@@ -265,3 +362,53 @@ def vote_post(
 
     db.commit()
     return {"status": "success"}
+
+@app.post("/messages/send")
+def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # Verify receiver exists
+    receiver = db.query(models.User).filter(models.User.id == receiver_id).first()
+    if not receiver:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    new_msg = models.Message(
+        sender_id=current_user.id,
+        receiver_id=receiver_id,
+        content=content,
+        timestamp=datetime.utcnow()
+    )
+    db.add(new_msg)
+    db.commit() # IMPORTANT: If you don't commit, it's gone on reload
+    return {"status": "sent"}
+
+@app.get("/messages/inbox")
+def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # Fetch messages where the user is either sender or receiver
+    messages = db.query(models.Message).filter(
+        (models.Message.sender_id == current_user.id) |
+        (models.Message.receiver_id == current_user.id)
+    ).order_by(models.Message.timestamp.desc()).all()
+
+    # You must return other_user_id so the frontend can filter the chat
+    results = []
+    for msg in messages:
+        other_id = msg.receiver_id if msg.sender_id == current_user.id else msg.sender_id
+        other_user = db.query(models.User).filter(models.User.id == other_id).first()
+        results.append({
+            "id": msg.id,
+            "content": msg.content,
+            "sender_id": msg.sender_id,
+            "receiver_id": msg.receiver_id,
+            "other_user_id": other_id,
+            "other_user_name": other_user.username if other_user else "Unknown",
+            "timestamp": msg.timestamp
+        })
+    return results
+
+@app.get("/users/search")
+def search_users(q: str, db: Session = Depends(get_db)):
+    # Finds users whose names start with or contain the search string
+    users = db.query(models.User).filter(
+        models.User.username.ilike(f"%{q}%")
+    ).limit(10).all()
+
+    return [{"id": u.id, "username": u.username} for u in users]

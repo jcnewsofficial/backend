@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON, DateTime, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON, DateTime, UniqueConstraint, Text
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
+from datetime import datetime
 from .database import Base
 
 class User(Base):
@@ -69,3 +70,16 @@ class Like(Base):
     post = relationship("Post")
 
     __table_args__ = (UniqueConstraint('user_id', 'post_id', name='_user_post_uc'),)
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"))
+    receiver_id = Column(Integer, ForeignKey("users.id"))
+    content = Column(Text, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships to easily get user info
+    sender = relationship("User", foreign_keys=[sender_id])
+    receiver = relationship("User", foreign_keys=[receiver_id])
