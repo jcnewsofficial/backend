@@ -365,7 +365,13 @@ def vote_post(
 
 @app.post("/messages/send")
 def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    # Verify receiver exists
+    # 1. THE "LOL" CHECK: Prevent self-messaging
+    if current_user.id == receiver_id:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot message yourself."
+        )
+
     receiver = db.query(models.User).filter(models.User.id == receiver_id).first()
     if not receiver:
         raise HTTPException(status_code=404, detail="User not found")
@@ -377,8 +383,12 @@ def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), 
         timestamp=datetime.utcnow()
     )
     db.add(new_msg)
-    db.commit() # IMPORTANT: If you don't commit, it's gone on reload
+    db.commit()
     return {"status": "sent"}
+
+@app.get("/users/me")
+def get_me(current_user: models.User = Depends(get_current_user)):
+    return {"id": current_user.id, "username": current_user.username}
 
 @app.get("/messages/inbox")
 def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
