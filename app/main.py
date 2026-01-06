@@ -363,6 +363,38 @@ def vote_post(
     db.commit()
     return {"status": "success"}
 
+@app.get("/posts/{post_id}", response_model=schemas.Post)
+def get_post(
+    post_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_optional_current_user)
+):
+    # 1. Fetch post with comments and authors pre-loaded
+    post = db.query(models.Post).options(
+        joinedload(models.Post.comments).joinedload(models.Comment.author)
+    ).filter(models.Post.id == post_id).first()
+
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    # 2. Increment view count (Logic for the "Most Viewed" sort)
+    post.views = (post.views or 0) + 1
+    db.commit()
+    db.refresh(post)
+
+    # 3. Calculate social counts
+    post.like_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == 1).count()
+    post.dislike_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == -1).count()
+
+    # 4. Check if current user has voted
+    post.user_vote = 0
+    if current_user:
+        vote = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.user_id == current_user.id).first()
+        if vote:
+            post.user_vote = vote.vote_type
+
+    return post
+
 @app.post("/messages/send")
 def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # 1. THE "LOL" CHECK: Prevent self-messaging
@@ -376,6 +408,7 @@ def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), 
     if not receiver:
         raise HTTPException(status_code=404, detail="User not found")
 
+    print(content)
     new_msg = models.Message(
         sender_id=current_user.id,
         receiver_id=receiver_id,
@@ -392,24 +425,30 @@ def get_me(current_user: models.User = Depends(get_current_user)):
 
 @app.get("/messages/inbox")
 def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    # Fetch messages where the user is either sender or receiver
-    messages = db.query(models.Message).filter(
+    # Use joinedload to get sender and receiver objects in one go
+    messages = db.query(models.Message).options(
+        joinedload(models.Message.sender),
+        joinedload(models.Message.receiver)
+    ).filter(
         (models.Message.sender_id == current_user.id) |
         (models.Message.receiver_id == current_user.id)
     ).order_by(models.Message.timestamp.desc()).all()
 
-    # You must return other_user_id so the frontend can filter the chat
     results = []
     for msg in messages:
-        other_id = msg.receiver_id if msg.sender_id == current_user.id else msg.sender_id
-        other_user = db.query(models.User).filter(models.User.id == other_id).first()
+        # Determine who the 'other' person is
+        if msg.sender_id == current_user.id:
+            other_user = msg.receiver
+        else:
+            other_user = msg.sender
+
         results.append({
             "id": msg.id,
             "content": msg.content,
             "sender_id": msg.sender_id,
             "receiver_id": msg.receiver_id,
-            "other_user_id": other_id,
-            "other_user_name": other_user.username if other_user else "Unknown",
+            "other_user_id": other_user.id if other_user else None,
+            "other_user_name": other_user.username if other_user else "Deleted User",
             "timestamp": msg.timestamp
         })
     return results
