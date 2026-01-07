@@ -425,7 +425,12 @@ def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), 
 
 @app.get("/users/me")
 def get_me(current_user: models.User = Depends(get_current_user)):
-    return {"id": current_user.id, "username": current_user.username}
+    # You MUST include avatar_url here so the app sees it on login/refresh
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "avatar_url": current_user.avatar_url
+    }
 
 @app.get("/messages/inbox")
 def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
