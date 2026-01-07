@@ -11,6 +11,14 @@ class CommentCreate(CommentBase):
     post_id: int
     parent_id: Optional[int] = None # Added this to allow replies
 
+class CommentAuthor(BaseModel):
+    id: int
+    username: str
+    avatar_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
 class Comment(CommentBase):
     id: int
     user_id: int

@@ -172,6 +172,8 @@ async def scrape_cbc_periodically():
                     )
                     db.add(new_post)
                     db.commit()
+        except Exception as e:
+            print(f"SCRAPER CRASHED: {e}")
         finally:
             db.close()
         await asyncio.sleep(600)
@@ -602,7 +604,9 @@ def get_friends_activity(
     for act in activities:
         results.append({
             "username": act.user.username,
+            "avatar_url": act.user.avatar_url,  # <--- ADD THIS
             "action": "liked" if act.vote_type == 1 else "disliked",
+            "post_id": act.post.id if act.post else None, # Helpful for navigation
             "post_title": act.post.headline if act.post else "a post",
             "timestamp": act.created_at
         })
