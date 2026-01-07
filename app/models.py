@@ -68,6 +68,7 @@ class Like(Base):
     # ADD THESE RELATIONSHIPS
     user = relationship("User")
     post = relationship("Post")
+    created_at = Column(DateTime, default=datetime.utcnow) # Add this!
 
     __table_args__ = (UniqueConstraint('user_id', 'post_id', name='_user_post_uc'),)
 
@@ -83,3 +84,16 @@ class Message(Base):
     # Relationships to easily get user info
     sender = relationship("User", foreign_keys=[sender_id])
     receiver = relationship("User", foreign_keys=[receiver_id])
+
+class Friendship(Base):
+    __tablename__ = "friendships"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))   # The person who sent the request
+    friend_id = Column(Integer, ForeignKey("users.id")) # The person receiving it
+    status = Column(String, default="pending")          # 'pending' or 'accepted'
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    requester = relationship("User", foreign_keys=[user_id])
+    receiver = relationship("User", foreign_keys=[friend_id])

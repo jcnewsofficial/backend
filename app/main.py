@@ -2,7 +2,7 @@ import asyncio
 from fastapi import FastAPI, Depends, HTTPException, Response, status, Header
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, or_
 from typing import List, Optional
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
@@ -461,3 +461,135 @@ def search_users(q: str, db: Session = Depends(get_db)):
     ).limit(10).all()
 
     return [{"id": u.id, "username": u.username} for u in users]
+
+@app.post("/friends/request/{target_id}")
+def send_friend_request(
+    target_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if current_user.id == target_id:
+        raise HTTPException(status_code=400, detail="Cannot add yourself")
+
+    # Check if request already exists (in either direction)
+    existing = db.query(models.Friendship).filter(
+        or_(
+            (models.Friendship.user_id == current_user.id) & (models.Friendship.friend_id == target_id),
+            (models.Friendship.user_id == target_id) & (models.Friendship.friend_id == current_user.id)
+        )
+    ).first()
+
+    if existing:
+        if existing.status == 'accepted':
+            raise HTTPException(status_code=400, detail="Already friends")
+        raise HTTPException(status_code=400, detail="Request already pending")
+
+    new_friendship = models.Friendship(
+        user_id=current_user.id,
+        friend_id=target_id,
+        status='pending'
+    )
+    db.add(new_friendship)
+    db.commit()
+    return {"status": "sent"}
+
+@app.post("/friends/accept/{request_id}")
+def accept_friend_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # Find the request where I AM THE RECEIVER (friend_id)
+    friendship = db.query(models.Friendship).filter(
+        models.Friendship.id == request_id,
+        models.Friendship.friend_id == current_user.id,
+        models.Friendship.status == 'pending'
+    ).first()
+
+    if not friendship:
+        raise HTTPException(status_code=404, detail="Friend request not found")
+
+    friendship.status = 'accepted'
+    db.commit()
+    return {"status": "accepted"}
+
+@app.get("/friends/requests")
+def get_friend_requests(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # Get requests where I am the receiver (friend_id) and status is pending
+    requests = db.query(models.Friendship).options(
+        joinedload(models.Friendship.requester)
+    ).filter(
+        models.Friendship.friend_id == current_user.id,
+        models.Friendship.status == 'pending'
+    ).all()
+
+    return [
+        {"id": r.id, "username": r.requester.username, "user_id": r.user_id}
+        for r in requests
+    ]
+
+@app.get("/friends/list")
+def get_friends_list(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # Find all accepted friendships where I am either the sender OR receiver
+    friendships = db.query(models.Friendship).filter(
+        (models.Friendship.user_id == current_user.id) | (models.Friendship.friend_id == current_user.id),
+        models.Friendship.status == 'accepted'
+    ).all()
+
+    friends = []
+    for f in friendships:
+        # If I sent it, the friend is the receiver. If I received it, friend is sender.
+        if f.user_id == current_user.id:
+            # I sent it, so fetch receiver info
+            friend_user = db.query(models.User).filter(models.User.id == f.friend_id).first()
+        else:
+            # I received it, so fetch sender info
+            friend_user = db.query(models.User).filter(models.User.id == f.user_id).first()
+
+        if friend_user:
+            friends.append({"id": friend_user.id, "username": friend_user.username})
+
+    return friends
+
+@app.get("/friends/activity")
+def get_friends_activity(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # 1. Get List of Friend IDs (same as before)
+    friendships = db.query(models.Friendship).filter(
+        (models.Friendship.user_id == current_user.id) | (models.Friendship.friend_id == current_user.id),
+        models.Friendship.status == 'accepted'
+    ).all()
+
+    friend_ids = []
+    for f in friendships:
+        friend_ids.append(f.friend_id if f.user_id == current_user.id else f.user_id)
+
+    if not friend_ids:
+        return []
+
+    # 2. FIXED QUERY: Use .in_(friend_ids) instead of (...)
+    activities = db.query(models.Like).options(
+        joinedload(models.Like.user),
+        joinedload(models.Like.post)
+    ).filter(
+        models.Like.user_id.in_(friend_ids)  # <--- FIX IS HERE
+    ).order_by(models.Like.created_at.desc()).limit(20).all()
+
+    results = []
+    for act in activities:
+        results.append({
+            "username": act.user.username,
+            "action": "liked" if act.vote_type == 1 else "disliked",
+            "post_title": act.post.headline if act.post else "a post",
+            "timestamp": act.created_at
+        })
+
+    return results
