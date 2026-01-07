@@ -16,6 +16,7 @@ class User(Base):
     # Relationships: A user can have many comments and many likes
     comments = relationship("Comment", back_populates="author")
     likes = relationship("Like", back_populates="user")
+    avatar_url = Column(String, nullable=True)
 
 class Post(Base):
     __tablename__ = "posts"

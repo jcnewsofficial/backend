@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import FastAPI, Depends, HTTPException, Response, status, Header
+from fastapi import FastAPI, Depends, HTTPException, Response, status, Header, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, func, or_
@@ -15,7 +15,10 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from .models import User
+from fastapi.staticfiles import StaticFiles
 
+import shutil
+import os
 
 # --- SECURITY CONFIGURATION ---
 SECRET_KEY = "DEVELOPMENT_SECRET_KEY_CHANGE_THIS_IN_PRODUCTION"
@@ -29,6 +32,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI(title="JC News Backend")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -593,3 +597,31 @@ def get_friends_activity(
         })
 
     return results
+
+@app.post("/users/me/avatar")
+async def upload_avatar(
+    file: UploadFile = File(...),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # 1. Create directory
+    upload_dir = "static/avatars"
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # 2. Create a unique filename (prevents conflicts if two users upload 'me.jpg')
+    extension = os.path.splitext(file.filename)[1]
+    unique_filename = f"user_{current_user.id}{extension}"
+    file_location = os.path.join(upload_dir, unique_filename)
+
+    # 3. Save the file
+    with open(file_location, "wb+") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # 4. Update Database
+    # We store the relative path.
+    # Frontend will combine this with the BASE_URL (e.g., http://192.168.1.10:8000/static/avatars/...)
+    avatar_path = f"/static/avatars/{unique_filename}"
+    current_user.avatar_url = avatar_path
+    db.commit()
+
+    return {"avatar_url": avatar_path}

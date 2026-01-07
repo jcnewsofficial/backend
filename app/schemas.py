@@ -62,6 +62,7 @@ class User(UserBase):
     id: int
     # FIX: Set default to True so FastAPI doesn't crash if DB doesn't return it immediately
     is_active: bool = True
+    avatar_url: Optional[str] = None
 
     class Config:
         from_attributes = True
