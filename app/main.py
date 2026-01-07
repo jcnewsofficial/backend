@@ -434,7 +434,6 @@ def get_me(current_user: models.User = Depends(get_current_user)):
 
 @app.get("/messages/inbox")
 def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    # Use joinedload to get sender and receiver objects in one go
     messages = db.query(models.Message).options(
         joinedload(models.Message.sender),
         joinedload(models.Message.receiver)
@@ -445,7 +444,6 @@ def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends
 
     results = []
     for msg in messages:
-        # Determine who the 'other' person is
         if msg.sender_id == current_user.id:
             other_user = msg.receiver
         else:
@@ -458,6 +456,7 @@ def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends
             "receiver_id": msg.receiver_id,
             "other_user_id": other_user.id if other_user else None,
             "other_user_name": other_user.username if other_user else "Deleted User",
+            "other_user_avatar": other_user.avatar_url if other_user else None, # <-- ADD THIS
             "timestamp": msg.timestamp
         })
     return results
@@ -469,7 +468,14 @@ def search_users(q: str, db: Session = Depends(get_db)):
         models.User.username.ilike(f"%{q}%")
     ).limit(10).all()
 
-    return [{"id": u.id, "username": u.username} for u in users]
+    # ADD avatar_url to the dictionary below:
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "avatar_url": u.avatar_url  # <--- CRITICAL ADDITION
+        } for u in users
+    ]
 
 @app.post("/friends/request/{target_id}")
 def send_friend_request(
