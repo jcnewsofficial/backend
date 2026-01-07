@@ -457,7 +457,7 @@ def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends
             "other_user_id": other_user.id if other_user else None,
             "other_user_name": other_user.username if other_user else "Deleted User",
             "other_user_avatar": other_user.avatar_url if other_user else None, # <-- ADD THIS
-            "timestamp": msg.timestamp
+            "timestamp": msg.timestamp.isoformat()
         })
     return results
 
@@ -542,7 +542,7 @@ def get_friend_requests(
     ).all()
 
     return [
-        {"id": r.id, "username": r.requester.username, "user_id": r.user_id}
+        {"id": r.id, "username": r.requester.username, "user_id": r.user_id, "avatar_url": r.requester.avatar_url}
         for r in requests
     ]
 
@@ -568,7 +568,7 @@ def get_friends_list(
             friend_user = db.query(models.User).filter(models.User.id == f.user_id).first()
 
         if friend_user:
-            friends.append({"id": friend_user.id, "username": friend_user.username})
+            friends.append({"id": friend_user.id, "username": friend_user.username, "avatar_url": friend_user.avatar_url})
 
     return friends
 
