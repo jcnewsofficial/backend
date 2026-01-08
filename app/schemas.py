@@ -11,14 +11,6 @@ class CommentCreate(CommentBase):
     post_id: int
     parent_id: Optional[int] = None # Added this to allow replies
 
-class CommentAuthor(BaseModel):
-    id: int
-    username: str
-    avatar_url: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
 class Comment(CommentBase):
     id: int
     user_id: int
@@ -27,6 +19,7 @@ class Comment(CommentBase):
     timestamp: Optional[datetime] = None
     username: str
     replies: List['Comment'] = [] # This allows nesting
+    avatar_url: Optional[str] = None
 
     class Config:
         from_attributes = True

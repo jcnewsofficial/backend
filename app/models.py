@@ -51,13 +51,20 @@ class Comment(Base):
     post = relationship("Post", back_populates="comments")
 
     # NEW: Relationship to fetch replies
-    replies = relationship("Comment", backref=backref('parent', remote_side=[id]), cascade="all, delete-orphan")
+    parent = relationship("Comment", remote_side=[id], back_populates="replies")
+    replies = relationship("Comment", back_populates="parent", cascade="all, delete-orphan")
 
     @property
     def username(self) -> str:
         if self.author:
             return self.author.username
         return "User"
+
+    @property
+    def avatar_url(self) -> str:
+        if self.author:
+            return self.author.avatar_url
+        return None
 
 class Like(Base):
     __tablename__ = "likes"
