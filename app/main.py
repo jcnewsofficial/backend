@@ -431,6 +431,31 @@ def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), 
     db.commit()
     return {"status": "sent"}
 
+# --- ADD THIS TO main.py ---
+
+@app.get("/messages/conversation/{other_user_id}")
+def get_conversation(
+    other_user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # This query gets the full history between you and the other person
+    messages = db.query(models.Message).filter(
+        ((models.Message.sender_id == current_user.id) & (models.Message.receiver_id == other_user_id)) |
+        ((models.Message.sender_id == other_user_id) & (models.Message.receiver_id == current_user.id))
+    ).order_by(models.Message.timestamp.asc()).all()
+
+    # Format the messages so the frontend can read them easily
+    return [
+        {
+            "id": m.id,
+            "content": m.content,
+            "sender_id": m.sender_id,
+            "receiver_id": m.receiver_id,
+            "timestamp": m.timestamp.isoformat()
+        } for m in messages
+    ]
+
 @app.get("/users/me")
 def get_me(current_user: models.User = Depends(get_current_user)):
     return {
@@ -452,20 +477,32 @@ def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends
     ).order_by(models.Message.timestamp.desc()).all()
 
     results = []
+    seen_users = set()
+
     for msg in messages:
         if msg.sender_id == current_user.id:
             other_user = msg.receiver
         else:
             other_user = msg.sender
 
+        if not other_user:
+            continue
+
+        # Prevent duplicate rows for the same conversation in the inbox list
+        if other_user.id in seen_users:
+            continue
+        seen_users.add(other_user.id)
+
         results.append({
             "id": msg.id,
             "content": msg.content,
             "sender_id": msg.sender_id,
             "receiver_id": msg.receiver_id,
-            "other_user_id": other_user.id if other_user else None,
-            "other_user_name": other_user.username if other_user else "Deleted User",
-            "other_user_avatar": other_user.avatar_url if other_user else None, # <-- ADD THIS
+            "other_user_id": other_user.id,
+            "other_user_name": other_user.username,
+            # CRITICAL: Add both URL and the Version
+            "other_user_avatar": other_user.avatar_url,
+            "other_user_avatar_version": other_user.avatar_version or 1,
             "timestamp": msg.timestamp.isoformat()
         })
     return results
@@ -482,7 +519,8 @@ def search_users(q: str, db: Session = Depends(get_db)):
         {
             "id": u.id,
             "username": u.username,
-            "avatar_url": u.avatar_url  # <--- CRITICAL ADDITION
+            "avatar_url": u.avatar_url,  # <--- CRITICAL ADDITION
+            "avatar_version": u.avatar_version or 1
         } for u in users
     ]
 
