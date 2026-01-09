@@ -343,8 +343,13 @@ def create_comment(
     )
     db.add(new_comment)
     db.commit()
-    db.refresh(new_comment)
-    return new_comment
+
+    # Eagerly load the author so the response includes username/avatar_url
+    db_comment = db.query(models.Comment).options(
+        joinedload(models.Comment.author)
+    ).filter(models.Comment.id == new_comment.id).first()
+
+    return db_comment
 
 @app.post("/posts/{post_id}/vote")
 def vote_post(
@@ -433,7 +438,7 @@ def get_me(current_user: models.User = Depends(get_current_user)):
         "username": current_user.username,
         "email": current_user.email,
         "avatar_url": current_user.avatar_url,
-        "avatar_version": current_user.avatar_version or 1 # <--- ADD THIS
+        "avatar_version": current_user.avatar_version or 1 # Key for cache busting
     }
 
 @app.get("/messages/inbox")

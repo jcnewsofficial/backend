@@ -4,12 +4,22 @@ from datetime import datetime
 
 # --- COMMENT SCHEMAS ---
 
+# Use this for nested data in comments/posts
+class UserProfile(BaseModel):
+    id: int
+    username: str
+    avatar_url: Optional[str] = None
+    avatar_version: int = 1
+
+    class Config:
+        from_attributes = True
+
 class CommentBase(BaseModel):
     content: str
 
 class CommentCreate(CommentBase):
     post_id: int
-    parent_id: Optional[int] = None # Added this to allow replies
+    parent_id: Optional[int] = None
 
 class Comment(CommentBase):
     id: int
@@ -17,11 +27,11 @@ class Comment(CommentBase):
     post_id: int
     parent_id: Optional[int] = None
     timestamp: Optional[datetime] = None
-    username: str
-    replies: List['Comment'] = [] # This allows nesting
-    avatar_url: Optional[str] = None
 
-    avatar_version: int = 1
+    # CHANGED: Instead of flat fields, we use the author relationship
+    author: Optional[UserProfile] = None
+
+    replies: List['Comment'] = []
 
     class Config:
         from_attributes = True
@@ -40,13 +50,13 @@ class PostCreate(PostBase):
 
 class Post(PostBase):
     id: int
-    comments: List[Comment] = [] # Tell Pydantic to include the list of comments
+    comments: List[Comment] = []
     like_count: int = 0
     dislike_count: int = 0
-    user_vote: Optional[int] = 0 # 1 if current user liked, -1 if disliked,
-    created_at: datetime # ADD THIS
-    views: int           # ADD THIS
-    url: Optional[str] = None # ADD THIS
+    user_vote: Optional[int] = 0
+    created_at: datetime
+    views: int
+    url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -63,10 +73,8 @@ class UserCreate(UserBase):
 
 class User(UserBase):
     id: int
-    # FIX: Set default to True so FastAPI doesn't crash if DB doesn't return it immediately
     is_active: bool = True
     avatar_url: Optional[str] = None
-
     avatar_version: int = 1
 
     class Config:
