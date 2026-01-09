@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 import shutil
 import os
+import glob
 
 # --- SECURITY CONFIGURATION ---
 SECRET_KEY = "DEVELOPMENT_SECRET_KEY_CHANGE_THIS_IN_PRODUCTION"
@@ -427,11 +428,12 @@ def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), 
 
 @app.get("/users/me")
 def get_me(current_user: models.User = Depends(get_current_user)):
-    # You MUST include avatar_url here so the app sees it on login/refresh
     return {
         "id": current_user.id,
         "username": current_user.username,
-        "avatar_url": current_user.avatar_url
+        "email": current_user.email,
+        "avatar_url": current_user.avatar_url,
+        "avatar_version": current_user.avatar_version or 1 # <--- ADD THIS
     }
 
 @app.get("/messages/inbox")
@@ -619,24 +621,42 @@ async def upload_avatar(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # 1. Create directory
     upload_dir = "static/avatars"
     os.makedirs(upload_dir, exist_ok=True)
 
-    # 2. Create a unique filename (prevents conflicts if two users upload 'me.jpg')
-    extension = os.path.splitext(file.filename)[1]
+    # 1. CLEANUP: Delete old files for this user to save space
+    # Look for any file starting with "user_{id}." regardless of extension (jpg, png, etc.)
+    search_pattern = os.path.join(upload_dir, f"user_{current_user.id}.*")
+    old_files = glob.glob(search_pattern)
+
+    for old_file in old_files:
+        try:
+            if os.path.exists(old_file):
+                os.remove(old_file)
+        except Exception as e:
+            print(f"Error deleting old avatar: {e}")
+
+    # 2. Create a unique filename for the NEW file
+    extension = os.path.splitext(file.filename)[1].lower()
+    if not extension: extension = ".jpg" # Fallback
     unique_filename = f"user_{current_user.id}{extension}"
     file_location = os.path.join(upload_dir, unique_filename)
 
-    # 3. Save the file
-    with open(file_location, "wb+") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # 3. Save the new file
+    try:
+        # Reset file pointer to the beginning before copying
+        await file.seek(0)
+        with open(file_location, "wb+") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        print(f"File Save Error: {e}")
+        raise HTTPException(status_code=500, detail="Could not save file to disk")
 
-    # 4. Update Database
-    # We store the relative path.
-    # Frontend will combine this with the BASE_URL (e.g., http://192.168.1.10:8000/static/avatars/...)
+    # 4. Update Database and Increment Version for Cache Busting
     avatar_path = f"/static/avatars/{unique_filename}"
     current_user.avatar_url = avatar_path
+    current_user.avatar_version = (current_user.avatar_version or 0) + 1
+
     db.commit()
 
-    return {"avatar_url": avatar_path}
+    return {"avatar_url": avatar_path, "version": current_user.avatar_version}

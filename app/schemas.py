@@ -21,6 +21,8 @@ class Comment(CommentBase):
     replies: List['Comment'] = [] # This allows nesting
     avatar_url: Optional[str] = None
 
+    avatar_version: int = 1
+
     class Config:
         from_attributes = True
 
@@ -64,6 +66,8 @@ class User(UserBase):
     # FIX: Set default to True so FastAPI doesn't crash if DB doesn't return it immediately
     is_active: bool = True
     avatar_url: Optional[str] = None
+
+    avatar_version: int = 1
 
     class Config:
         from_attributes = True

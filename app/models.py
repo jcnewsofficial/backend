@@ -17,6 +17,7 @@ class User(Base):
     comments = relationship("Comment", back_populates="author")
     likes = relationship("Like", back_populates="user")
     avatar_url = Column(String, nullable=True)
+    avatar_version = Column(Integer, default=1)
 
 class Post(Base):
     __tablename__ = "posts"
