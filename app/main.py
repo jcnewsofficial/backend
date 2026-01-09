@@ -138,15 +138,15 @@ async def generic_news_scraper(rss_urls: List[str], limit_per_feed: int = 5):
                         exists = db.query(models.Post).filter(models.Post.url == link).first()
                         if exists: continue
 
+                        # --- NEW: Extract Timestamp from RSS ---
+                        # RSS dates are usually in 'published_parsed' as a time struct
+                        pub_date = datetime.utcnow() # Default fallback
+                        if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                            pub_date = datetime.fromtimestamp(mktime(entry.published_parsed))
+
                         # 2. Parse Data
-                        print(f"Scraping Article: {link}")
                         scraped_data = auto_parse_news(link)
                         if not scraped_data: continue
-
-                        # 3. Handle Generic Metadata
-                        source_name = scraped_data.get("source_name")
-                        if not source_name:
-                            source_name = link.split('//')[-1].split('www.')[-1].split('.')[0].upper()
 
                         new_post = models.Post(
                             headline=scraped_data["headline"],
@@ -155,7 +155,9 @@ async def generic_news_scraper(rss_urls: List[str], limit_per_feed: int = 5):
                             bullet_points=scraped_data["bullets"],
                             url=link,
                             source_url=link,
-                            source_name=source_name
+                            source_name=source_name,
+                            # OVERRIDE the default now() with the actual article date
+                            created_at=pub_date
                         )
 
                         db.add(new_post)
@@ -449,7 +451,7 @@ def get_conversation(
     current_user: models.User = Depends(get_current_user)
 ):
     # This query gets the full history between you and the other person
-    messages = db.query(models.Message).filter(hg
+    messages = db.query(models.Message).filter(
         ((models.Message.sender_id == current_user.id) & (models.Message.receiver_id == other_user_id)) |
         ((models.Message.sender_id == other_user_id) & (models.Message.receiver_id == current_user.id))
     ).order_by(models.Message.timestamp.asc()).all()
