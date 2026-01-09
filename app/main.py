@@ -304,6 +304,41 @@ def read_posts(
 
     return posts
 
+@app.get("/news/search")
+def search_news(
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    time: Optional[str] = "all", # Options: "24h", "week", "month", "all"
+    db: Session = Depends(get_db)
+):
+    # 1. Start with a base query on the Post model
+    query = db.query(models.Post)
+
+    # 2. Filter by Keyword (Headline)
+    if q:
+        query = query.filter(models.Post.headline.ilike(f"%{q}%"))
+
+    # 3. Filter by Category
+    if category and category != "All":
+        query = query.filter(models.Post.category == category)
+
+    # 4. Filter by Time Range
+    if time != "all":
+        now = datetime.utcnow()
+        if time == "24h":
+            start_date = now - timedelta(hours=24)
+        elif time == "week":
+            start_date = now - timedelta(days=7)
+        elif time == "month":
+            start_date = now - timedelta(days=30)
+
+        query = query.filter(models.Post.created_at >= start_date)
+
+    # 5. Execute and return (limit to 20 for search performance)
+    results = query.order_by(desc(models.Post.created_at)).limit(20).all()
+
+    return results
+
 @app.post("/auto-scrape", status_code=201)
 async def create_automated_post(url: str, category: str, db: Session = Depends(get_db)):
     try:
@@ -440,7 +475,7 @@ def get_conversation(
     current_user: models.User = Depends(get_current_user)
 ):
     # This query gets the full history between you and the other person
-    messages = db.query(models.Message).filter(
+    messages = db.query(models.Message).filter(hg
         ((models.Message.sender_id == current_user.id) & (models.Message.receiver_id == other_user_id)) |
         ((models.Message.sender_id == other_user_id) & (models.Message.receiver_id == current_user.id))
     ).order_by(models.Message.timestamp.asc()).all()
