@@ -27,6 +27,7 @@ class Post(Base):
     category = Column(String)
     bullet_points = Column(JSON) # List of strings
     source_url = Column(String)
+    source_name = Column(String, nullable=True)
     url = Column(String)
 
     # Relationships
@@ -66,6 +67,12 @@ class Comment(Base):
         if self.author:
             return self.author.avatar_url
         return None
+
+    @property
+    def avatar_version(self) -> int:
+        if self.author:
+            return self.author.avatar_version
+        return 1
 
 class Like(Base):
     __tablename__ = "likes"

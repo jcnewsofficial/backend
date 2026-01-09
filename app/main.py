@@ -1,4 +1,5 @@
 import asyncio
+import feedparser
 from fastapi import FastAPI, Depends, HTTPException, Response, status, Header, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
@@ -20,6 +21,8 @@ from fastapi.staticfiles import StaticFiles
 import shutil
 import os
 import glob
+import socket
+
 
 # --- SECURITY CONFIGURATION ---
 SECRET_KEY = "DEVELOPMENT_SECRET_KEY_CHANGE_THIS_IN_PRODUCTION"
@@ -90,99 +93,98 @@ def get_optional_current_user(token: Optional[str] = Depends(oauth2_scheme), db:
         return None
     return None
 
-def get_cbc_links():
-    url = "https://www.cbc.ca/news"
-    # Modern headers to avoid being blocked
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+def extract_category_from_url(url: str) -> str:
+    url = url.lower()
+    if 'tech' in url or 'gadget' in url: return 'Tech'
+    if 'politics' in url or 'election' in url: return 'Politics'
+    if 'business' in url or 'money' in url: return 'Business'
+    if 'world' in url: return 'World'
+    if 'sport' in url: return 'Sports'
+    return 'General'
 
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.content, 'html.parser')
+def get_links_from_rss(rss_url: str) -> List[str]:
+    """Works for almost any news site RSS feed"""
+    feed = feedparser.parse(rss_url)
+    # Extract just the URLs from the feed entries
+    return [entry.link for entry in feed.entries]
 
-        links = []
-        # CBC uses a specific class for their primary story links
-        # We look for all anchor tags
-        for a in soup.find_all('a', href=True):
-            href = a['href']
+socket.setdefaulttimeout(15)
 
-            # Pattern check:
-            # 1. Must contain /news/
-            # 2. Usually ends with a pattern like 1.7034234 (the ID)
-            # 3. We ignore links to category sections (like just /news/world)
-            if "/news/" in href and any(char.isdigit() for char in href):
-                # Clean up relative URLs
-                if href.startswith('/'):
-                    full_url = f"https://www.cbc.ca{href}"
-                elif href.startswith('http'):
-                    full_url = href
-                else:
-                    continue
-
-                # Filter out duplicates and non-story links (like 'top-news' index)
-                if full_url not in links and "desktop-top-navigation" not in full_url:
-                    links.append(full_url)
-
-        print(f"Found {len(links)} potential articles.")
-        return links[:5]
-
-    except Exception as e:
-        print(f"Error fetching CBC links: {e}")
-        return []
-
-def extract_category_from_url(url):
-    try:
-        # 1. Parse the URL
-        path = urlparse(url).path  # Result: "/news/world/some-story-1.123"
-
-        # 2. Split by slashes and remove empty strings
-        parts = [p for p in path.split('/') if p]
-
-        # 3. Logic for CBC structure:
-        # parts[0] is usually 'news'
-        # parts[1] is usually the category (world, canada, politics, etc.)
-        if len(parts) >= 2 and parts[0] == 'news':
-            category = parts[1]
-            return category.capitalize() # Returns "World", "Canada", etc.
-
-        return "General" # Fallback if structure is different
-    except Exception:
-        return "General"
-
-async def scrape_cbc_periodically():
+async def generic_news_scraper(rss_urls: List[str], limit_per_feed: int = 5):
     while True:
         db = SessionLocal()
         try:
-            article_links = get_cbc_links()
-            for link in article_links:
-                exists = db.query(models.Post).filter(models.Post.url == link).first()
-                if exists: continue
-                print(link)
-                # PARSE CATEGORY AUTOMATICALLY
-                auto_category = extract_category_from_url(link)
-                scraped_data = auto_parse_news(link)
-                if scraped_data:
-                    new_post = models.Post(
-                        headline=scraped_data["headline"],
-                        image_url=scraped_data.get("image_url"),
-                        category=auto_category, # <--- USED HERE
-                        bullet_points=scraped_data["bullets"],
-                        url=link,
-                        source_url=link
-                    )
-                    db.add(new_post)
-                    db.commit()
+            print(f"--- Starting Generic Scrape (Limit: {limit_per_feed} per feed) ---")
+            for rss_url in rss_urls:
+                try:
+                    print(f"Fetching: {rss_url}")
+
+                    # FIX: Run the blocking 'parse' call in a thread so it doesn't freeze the app
+                    loop = asyncio.get_event_loop()
+                    feed = await loop.run_in_executor(None, lambda: feedparser.parse(rss_url))
+
+                    # Check for "Bozo" bit (feedparser's way of saying the XML is broken or timed out)
+                    if feed.get('bozo'):
+                        print(f"Warning: Feed issue with {rss_url}: {feed.bozo_exception}")
+                        # If entries exist despite bozo, we can still try to process them
+
+                    entries = feed.entries[:limit_per_feed]
+                    print(f"Processing {len(entries)} items from: {rss_url}")
+
+                    for entry in entries:
+                        link = entry.link
+
+                        # 1. Skip if exists
+                        exists = db.query(models.Post).filter(models.Post.url == link).first()
+                        if exists: continue
+
+                        # 2. Parse Data
+                        print(f"Scraping Article: {link}")
+                        scraped_data = auto_parse_news(link)
+                        if not scraped_data: continue
+
+                        # 3. Handle Generic Metadata
+                        source_name = scraped_data.get("source_name")
+                        if not source_name:
+                            source_name = link.split('//')[-1].split('www.')[-1].split('.')[0].upper()
+
+                        new_post = models.Post(
+                            headline=scraped_data["headline"],
+                            image_url=scraped_data.get("image_url"),
+                            category=extract_category_from_url(link),
+                            bullet_points=scraped_data["bullets"],
+                            url=link,
+                            source_url=link,
+                            source_name=source_name
+                        )
+
+                        db.add(new_post)
+                        db.commit()
+                        print(f"Added: [{source_name}] {scraped_data['headline'][:40]}...")
+
+                        await asyncio.sleep(2)
+
+                except Exception as feed_err:
+                    print(f"Failed to process feed {rss_url}: {feed_err}")
+                    continue # Move to the next RSS URL in the list
+
         except Exception as e:
-            print(f"SCRAPER CRASHED: {e}")
+            print(f"Global Scraper Error: {e}")
         finally:
             db.close()
-        await asyncio.sleep(600)
 
-# Start the task when FastAPI starts
+        print("--- Cycle Complete. Sleeping 30m ---")
+        await asyncio.sleep(1800)
+
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(scrape_cbc_periodically())
+    feeds = [
+        "https://www.cbc.ca/cmlink/rss-topstories",
+        "http://feeds.bbci.co.uk/news/rss.xml",
+        "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
+    ]
+    # Scraping the top 5 most recent articles from each of the 3 feeds
+    asyncio.create_task(generic_news_scraper(feeds, limit_per_feed=5))
 
 # --- AUTH ENDPOINTS ---
 
@@ -216,13 +218,14 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @app.get("/feed", response_model=List[schemas.Post])
 def read_posts(
-    sort: str = "newest",           # newest, liked, viewed
-    category: Optional[str] = None, # All, Tech, Politics, etc.
-    time: str = "all",              # 24h, week, month, year, all
+    sort: str = "newest",
+    category: Optional[str] = None,
+    time: str = "all",
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
-    # 1. Start the query with eager loading for comments and authors
+    # 1. Start the query with eager loading
+    # Added source_name and source_url check ensures they are ready for the frontend
     query = db.query(models.Post).options(
         joinedload(models.Post.comments).joinedload(models.Comment.author)
     )
@@ -231,9 +234,9 @@ def read_posts(
     if category and category != "All":
         query = query.filter(models.Post.category.ilike(category))
 
-    # 3. Apply Time Range Filter (Only for Liked or Viewed)
-    # This prevents old viral posts from staying at the top forever
-    if sort in ["liked", "viewed"] and time != "all":
+    # 3. Apply Time Range Filter
+    # TIP: I enabled this for "newest" as well so users can see "Newest of the Day"
+    if time != "all":
         now = datetime.utcnow()
         if time == "24h":
             start_date = now - timedelta(hours=24)
@@ -251,28 +254,23 @@ def read_posts(
 
     # 4. Apply Sorting Logic
     if sort == "liked":
-        # 1. Subquery to count positive votes
         like_counts = db.query(
             models.Like.post_id,
             func.count(models.Like.id).label('total_likes')
         ).filter(models.Like.vote_type == 1).group_by(models.Like.post_id).subquery()
 
-        # 2. Join the subquery
         query = query.outerjoin(like_counts, models.Post.id == like_counts.c.post_id)
-
-        # 3. Use COALESCE to treat NULL as 0
-        # This ensures 1 like > 0 likes (instead of NULL breaking the sort)
         query = query.order_by(
             desc(func.coalesce(like_counts.c.total_likes, 0)),
-            desc(models.Post.created_at)
+            desc(models.Post.created_at) # Tie-breaker: newest first
         )
 
     elif sort == "viewed":
-        # Assumes you have a 'views' column in your Post model
         query = query.order_by(desc(models.Post.views), desc(models.Post.created_at))
 
     else:
-        # Default: Newest (Sorting by ID is often the same as Date but faster)
+        # Default: Newest
+        # Using created_at ensures your "2h ago" frontend logic stays accurate
         query = query.order_by(desc(models.Post.created_at))
 
     # 5. Execute Query
@@ -280,19 +278,18 @@ def read_posts(
 
     # 6. Post-process counts and user-specific votes
     for post in posts:
-        # Get count of Likes (1)
+        # Optimization: We can count both likes and dislikes in one query if needed,
+        # but for a small app, this is fine.
         post.like_count = db.query(models.Like).filter(
             models.Like.post_id == post.id,
             models.Like.vote_type == 1
         ).count()
 
-        # Get count of Dislikes (-1)
         post.dislike_count = db.query(models.Like).filter(
             models.Like.post_id == post.id,
             models.Like.vote_type == -1
         ).count()
 
-        # Check if the logged-in user has voted on this specific post
         post.user_vote = 0
         if current_user:
             vote = db.query(models.Like).filter(
@@ -338,29 +335,6 @@ def search_news(
     results = query.order_by(desc(models.Post.created_at)).limit(20).all()
 
     return results
-
-@app.post("/auto-scrape", status_code=201)
-async def create_automated_post(url: str, category: str, db: Session = Depends(get_db)):
-    try:
-        scraped_data = auto_parse_news(url)
-        new_post = models.Post(
-            headline=scraped_data["headline"],
-            image_url=scraped_data.get("image_url", "https://example.com/default.jpg"),
-            category=category,
-            bullet_points=scraped_data["bullets"],
-            # Ensure the database field 'url' is populated
-            url=url,
-            # You can keep source_url if your model has both,
-            # but 'url' is what the feed query was crashing on.
-            source_url=url
-        )
-        db.add(new_post)
-        db.commit()
-        db.refresh(new_post)
-        return {"status": "success", "post_id": new_post.id}
-    except Exception as e:
-        db.rollback() # Good practice to rollback on failure
-        raise HTTPException(status_code=500, detail=str(e))
 
 # --- SOCIAL ENDPOINTS ---
 

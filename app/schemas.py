@@ -44,6 +44,7 @@ class PostBase(BaseModel):
     category: str
     bullet_points: List[str]
     source_url: Optional[str] = None # Using str instead of HttpUrl for more flexibility with DB strings
+    source_name: Optional[str] = None
 
 class PostCreate(PostBase):
     pass
