@@ -12,36 +12,56 @@ api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key)
 
 def auto_parse_news(url):
-    # 1. Fetch HTML
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, 'html.parser')
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None
 
-    # 2. Extract Data
-    headline = soup.find('h1').get_text().strip()
-    # Try to find the first image in the article
-    img_tag = soup.find('meta', property="og:image")
-    image_url = img_tag['content'] if img_tag else "https://example.com/default-capy.jpg"
-    
-    # Get main text content
-    paragraphs = soup.find_all('p')
-    full_text = " ".join([p.text for p in paragraphs[:5]])
+        soup = BeautifulSoup(response.content, 'html.parser')
 
-    # 3. AI Processing
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{
-            "role": "system", 
-            "content": "You are a news editor. Summarize the following news into exactly 3 bullet points. Keep each point under 15 words."
-        }, {"role": "user", "content": full_text}]
-    )
-    
-    # Split AI response into a list of 3 strings
-    raw_bullets = response.choices[0].message.content.strip()
-    bullets = [b.strip("- ").strip() for b in raw_bullets.split('\n') if b.strip()][:3]
+        # --- 1. Resilient Headline Extraction ---
+        # Try H1 first, then OpenGraph tags (standard for NYT/BBC)
+        headline = None
+        headline_tag = soup.find('h1') or soup.find('meta', property='og:title')
 
-    return {
-        "headline": headline,
-        "image_url": image_url,
-        "bullets": bullets
-    }
+        if headline_tag:
+            # If it's a meta tag, get the 'content' attribute; otherwise get_text
+            headline = headline_tag.get('content') if headline_tag.name == 'meta' else headline_tag.get_text()
+
+        if not headline or len(headline.strip()) < 5:
+            return None # Skip if no valid headline
+
+        # --- 2. Resilient Image Extraction ---
+        image_url = None
+        # Look for the high-quality Social Media image first
+        img_tag = soup.find('meta', property='og:image') or soup.find('meta', name='twitter:image')
+        if img_tag:
+            image_url = img_tag.get('content')
+
+        # --- 3. Smart Bullet Point Extraction ---
+        # Instead of just looking for <li>, we look for the main body paragraphs
+        # and take the first 3 as "bullets"
+        bullets = []
+        # Common article body tags
+        body_parts = soup.find_all(['p', 'li'], limit=15)
+        for p in body_parts:
+            text = p.get_text().strip()
+            # Only take meaningful sentences (between 40 and 250 characters)
+            if 40 < len(text) < 250 and not any(x in text.lower() for x in ['subscribe', 'cookie', 'follow us']):
+                bullets.append(text)
+            if len(bullets) >= 3: break
+
+        # Fallback if no bullets found
+        if not bullets:
+            bullets = ["Click the link to read the full coverage of this developing story."]
+
+        return {
+            "headline": headline.strip(),
+            "image_url": image_url,
+            "bullets": bullets
+        }
+
+    except Exception as e:
+        print(f"Parsing error for {url}: {e}")
+        return None

@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from .models import User
 from fastapi.staticfiles import StaticFiles
+from time import mktime
 
 import shutil
 import os
@@ -110,53 +111,63 @@ def get_links_from_rss(rss_url: str) -> List[str]:
 
 socket.setdefaulttimeout(15)
 
-async def generic_news_scraper(rss_urls: List[str], limit_per_feed: int = 5):
+SOURCE_MAPPING = {
+    "cbc.ca": "CBC News",
+    "bbc.co.uk": "BBC News",
+    "nytimes.com": "NY Times",
+    "aljazeera.com": "Al Jazeera",
+    "theverge.com": "The Verge",
+    "techcrunch.com": "TechCrunch",
+    "wired.com": "Wired"
+}
+
+async def generic_news_scraper(rss_urls, limit_per_feed=5):
     while True:
         db = SessionLocal()
         try:
-            print(f"--- Starting Generic Scrape (Limit: {limit_per_feed} per feed) ---")
+            print(f"--- Starting Generic Scrape ---")
             for rss_url in rss_urls:
                 try:
-                    print(f"Fetching: {rss_url}")
+                    # FIX: Identify source_name from the URL
+                    source_name = "General News" # Fallback
+                    for domain, name in SOURCE_MAPPING.items():
+                        if domain in rss_url:
+                            source_name = name
+                            break
 
-                    # FIX: Run the blocking 'parse' call in a thread so it doesn't freeze the app
+                    print(f"Fetching: {rss_url} ({source_name})")
+
                     loop = asyncio.get_event_loop()
                     feed = await loop.run_in_executor(None, lambda: feedparser.parse(rss_url))
 
-                    # Check for "Bozo" bit (feedparser's way of saying the XML is broken or timed out)
                     if feed.get('bozo'):
-                        print(f"Warning: Feed issue with {rss_url}: {feed.bozo_exception}")
-                        # If entries exist despite bozo, we can still try to process them
+                        print(f"Warning: Feed issue with {rss_url}")
 
                     entries = feed.entries[:limit_per_feed]
-                    print(f"Processing {len(entries)} items from: {rss_url}")
-
                     for entry in entries:
                         link = entry.link
 
-                        # 1. Skip if exists
-                        exists = db.query(models.Post).filter(models.Post.url == link).first()
-                        if exists: continue
+                        if db.query(models.Post).filter(models.Post.url == link).first():
+                            continue
 
-                        # --- NEW: Extract Timestamp from RSS ---
-                        # RSS dates are usually in 'published_parsed' as a time struct
-                        pub_date = datetime.utcnow() # Default fallback
+                        # FIX: mktime handling
+                        pub_date = datetime.utcnow()
                         if hasattr(entry, 'published_parsed') and entry.published_parsed:
                             pub_date = datetime.fromtimestamp(mktime(entry.published_parsed))
 
                         # 2. Parse Data
                         scraped_data = auto_parse_news(link)
-                        if not scraped_data: continue
+                        if not scraped_data:
+                            continue
 
                         new_post = models.Post(
                             headline=scraped_data["headline"],
                             image_url=scraped_data.get("image_url"),
-                            category=extract_category_from_url(link),
+                            category=extract_category_from_url(link) or "General",
                             bullet_points=scraped_data["bullets"],
                             url=link,
                             source_url=link,
-                            source_name=source_name,
-                            # OVERRIDE the default now() with the actual article date
+                            source_name=source_name, # Now defined!
                             created_at=pub_date
                         )
 
@@ -164,11 +175,11 @@ async def generic_news_scraper(rss_urls: List[str], limit_per_feed: int = 5):
                         db.commit()
                         print(f"Added: [{source_name}] {scraped_data['headline'][:40]}...")
 
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1)
 
                 except Exception as feed_err:
                     print(f"Failed to process feed {rss_url}: {feed_err}")
-                    continue # Move to the next RSS URL in the list
+                    continue
 
         except Exception as e:
             print(f"Global Scraper Error: {e}")
@@ -181,9 +192,24 @@ async def generic_news_scraper(rss_urls: List[str], limit_per_feed: int = 5):
 @app.on_event("startup")
 async def startup_event():
     feeds = [
+        # General & Top Stories
         "https://www.cbc.ca/cmlink/rss-topstories",
         "http://feeds.bbci.co.uk/news/rss.xml",
-        "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
+        "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
+        "https://www.aljazeera.com/xml/rss/all.xml",
+
+        # Technology
+        "https://www.theverge.com/rss/index.xml",
+        "https://feeds.feedburner.com/TechCrunch/",
+        "https://wired.com/feed/rss",
+
+        # Business & Finance
+        "https://search.cnbc.com/rs/search/view.xml?partnerId=2000&keywords=finance",
+        "http://feeds.marketwatch.com/marketwatch/topstories/",
+
+        # Science & Health
+        "https://www.sciencedaily.com/rss/all.xml",
+        "https://rss.medicalnewstoday.com/featured.xml"
     ]
     # Scraping the top 5 most recent articles from each of the 3 feeds
     asyncio.create_task(generic_news_scraper(feeds, limit_per_feed=5))
