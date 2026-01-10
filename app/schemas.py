@@ -81,7 +81,10 @@ class User(UserBase):
     class Config:
         from_attributes = True
 
-
+class VoteResponse(BaseModel):
+    like_count: int
+    dislike_count: int
+    user_vote: int
 # --- AUTH SCHEMAS ---
 
 class Token(BaseModel):

@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from .models import User
 from fastapi.staticfiles import StaticFiles
 from time import mktime
+import threading
 
 import shutil
 import os
@@ -192,27 +193,28 @@ async def generic_news_scraper(rss_urls, limit_per_feed=5):
 @app.on_event("startup")
 async def startup_event():
     feeds = [
-        # General & Top Stories
         "https://www.cbc.ca/cmlink/rss-topstories",
         "http://feeds.bbci.co.uk/news/rss.xml",
         "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
         "https://www.aljazeera.com/xml/rss/all.xml",
-
-        # Technology
         "https://www.theverge.com/rss/index.xml",
         "https://feeds.feedburner.com/TechCrunch/",
         "https://wired.com/feed/rss",
-
-        # Business & Finance
         "https://search.cnbc.com/rs/search/view.xml?partnerId=2000&keywords=finance",
         "http://feeds.marketwatch.com/marketwatch/topstories/",
-
-        # Science & Health
         "https://www.sciencedaily.com/rss/all.xml",
         "https://rss.medicalnewstoday.com/featured.xml"
     ]
-    # Scraping the top 5 most recent articles from each of the 3 feeds
-    asyncio.create_task(generic_news_scraper(feeds, limit_per_feed=5))
+
+    # Define a helper to run the async function in a new thread's loop
+    def run_scraper():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(generic_news_scraper(feeds, limit_per_feed=5))
+
+    # Start the thread
+    #scraper_thread = threading.Thread(target=run_scraper, daemon=True)
+    #scraper_thread.start()
 
 # --- AUTH ENDPOINTS ---
 
@@ -252,36 +254,31 @@ def read_posts(
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
-    # 1. Start the query with eager loading
-    # Added source_name and source_url check ensures they are ready for the frontend
+    # 1. Start Query
     query = db.query(models.Post).options(
         joinedload(models.Post.comments).joinedload(models.Comment.author)
     )
 
-    # 2. Apply Category Filter
-    if category and category != "All":
+    # 2. Filters (Category & Time)
+    if category and category.strip() != "" and category.lower() != "all":
         query = query.filter(models.Post.category.ilike(category))
 
-    # 3. Apply Time Range Filter
-    # TIP: I enabled this for "newest" as well so users can see "Newest of the Day"
     if time != "all":
         now = datetime.utcnow()
+        start_date = None
         if time == "24h":
             start_date = now - timedelta(hours=24)
         elif time == "week":
             start_date = now - timedelta(weeks=1)
         elif time == "month":
             start_date = now - timedelta(days=30)
-        elif time == "year":
-            start_date = now - timedelta(days=365)
-        else:
-            start_date = None
 
         if start_date:
             query = query.filter(models.Post.created_at >= start_date)
 
-    # 4. Apply Sorting Logic
+    # 3. Apply Sorting
     if sort == "liked":
+        # Sort by join count logic (keep your existing logic here if it works)
         like_counts = db.query(
             models.Like.post_id,
             func.count(models.Like.id).label('total_likes')
@@ -290,42 +287,38 @@ def read_posts(
         query = query.outerjoin(like_counts, models.Post.id == like_counts.c.post_id)
         query = query.order_by(
             desc(func.coalesce(like_counts.c.total_likes, 0)),
-            desc(models.Post.created_at) # Tie-breaker: newest first
+            desc(models.Post.created_at)
         )
-
-    elif sort == "viewed":
-        query = query.order_by(desc(models.Post.views), desc(models.Post.created_at))
-
     else:
-        # Default: Newest
-        # Using created_at ensures your "2h ago" frontend logic stays accurate
         query = query.order_by(desc(models.Post.created_at))
 
-    # 5. Execute Query
+    # 4. Execute Query
     posts = query.all()
 
-    # 6. Post-process counts and user-specific votes
+    # --- CRITICAL FIX: POPULATE COUNTS ---
+    # We must calculate counts for every post before returning
     for post in posts:
-        # Optimization: We can count both likes and dislikes in one query if needed,
-        # but for a small app, this is fine.
+        # Calculate Likes
         post.like_count = db.query(models.Like).filter(
             models.Like.post_id == post.id,
             models.Like.vote_type == 1
         ).count()
 
+        # Calculate Dislikes
         post.dislike_count = db.query(models.Like).filter(
             models.Like.post_id == post.id,
             models.Like.vote_type == -1
         ).count()
 
+        # Calculate User Vote (if logged in)
         post.user_vote = 0
         if current_user:
-            vote = db.query(models.Like).filter(
+            user_vote_obj = db.query(models.Like).filter(
                 models.Like.post_id == post.id,
                 models.Like.user_id == current_user.id
             ).first()
-            if vote:
-                post.user_vote = vote.vote_type
+            if user_vote_obj:
+                post.user_vote = user_vote_obj.vote_type
 
     return posts
 
@@ -388,7 +381,7 @@ def create_comment(
 
     return db_comment
 
-@app.post("/posts/{post_id}/vote")
+@app.post("/posts/{post_id}/vote", response_model=schemas.VoteResponse)
 def vote_post(
     post_id: int,
     vote_type: int,
@@ -400,17 +393,32 @@ def vote_post(
         models.Like.user_id == current_user.id
     ).first()
 
+    # Track what the final state will be for the frontend
+    final_user_vote = vote_type
+
     if existing_vote:
         if existing_vote.vote_type == vote_type:
+            # User clicked the same button again -> Remove the vote
             db.delete(existing_vote)
+            final_user_vote = 0
         else:
+            # User changed from like to dislike or vice versa
             existing_vote.vote_type = vote_type
     else:
         new_vote = models.Like(user_id=current_user.id, post_id=post_id, vote_type=vote_type)
         db.add(new_vote)
 
     db.commit()
-    return {"status": "success"}
+
+    # Get fresh counts
+    likes = db.query(models.Like).filter(models.Like.post_id == post_id, models.Like.vote_type == 1).count()
+    dislikes = db.query(models.Like).filter(models.Like.post_id == post_id, models.Like.vote_type == -1).count()
+
+    return {
+        "like_count": likes,
+        "dislike_count": dislikes,
+        "user_vote": final_user_vote
+    }
 
 @app.get("/posts/{post_id}", response_model=schemas.Post)
 def get_post(
@@ -457,7 +465,6 @@ def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), 
     if not receiver:
         raise HTTPException(status_code=404, detail="User not found")
 
-    print(content)
     new_msg = models.Message(
         sender_id=current_user.id,
         receiver_id=receiver_id,
