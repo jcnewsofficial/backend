@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 from openai import OpenAI
 import os
 from dotenv import load_dotenv  # <--- THIS IS THE MISSING LINE
+import json
 
 # Load variables from .env
 load_dotenv()
@@ -15,53 +16,63 @@ def auto_parse_news(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return None
+        if response.status_code != 200: return None
 
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        # --- 1. Resilient Headline Extraction ---
-        # Try H1 first, then OpenGraph tags (standard for NYT/BBC)
-        headline = None
+        # 1. Scrape Headline & Image (Standard Metadata)
         headline_tag = soup.find('h1') or soup.find('meta', property='og:title')
+        headline = headline_tag.get('content') if headline_tag.name == 'meta' else headline_tag.get_text()
 
-        if headline_tag:
-            # If it's a meta tag, get the 'content' attribute; otherwise get_text
-            headline = headline_tag.get('content') if headline_tag.name == 'meta' else headline_tag.get_text()
+        img_tag = soup.find('meta', property='og:image')
+        image_url = img_tag.get('content') if img_tag else None
 
-        if not headline or len(headline.strip()) < 5:
-            return None # Skip if no valid headline
+        # 2. Extract Body Text (First 1500 characters is usually enough for AI)
+        all_paragraphs = soup.find_all('p')
+        full_text = " ".join([p.get_text() for p in all_paragraphs[:8]])
 
-        # --- 2. Resilient Image Extraction ---
-        image_url = None
-        # Look for the high-quality Social Media image first
-        img_tag = soup.find('meta', property='og:image') or soup.find('meta', name='twitter:image')
-        if img_tag:
-            image_url = img_tag.get('content')
+        # 3. AI Gatekeeper & Summarizer
+        # We ask for JSON so it's easy for Python to read the 'is_ad' flag
+        response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an elite news editor for a hard-news application. "
+                    "Your job is to filter out any content that is a: "
+                    "1. Product Review or Hands-on (e.g., 'Review: Fujifilm X-E5'). "
+                    "2. Product Roundup or Buying Guide (e.g., 'Best Mirrorless Cameras'). "
+                    "3. Sponsored post or Advertisement. "
+                    "4. Shopping deal or 'Price Drop' announcement. "
 
-        # --- 3. Smart Bullet Point Extraction ---
-        # Instead of just looking for <li>, we look for the main body paragraphs
-        # and take the first 3 as "bullets"
-        bullets = []
-        # Common article body tags
-        body_parts = soup.find_all(['p', 'li'], limit=15)
-        for p in body_parts:
-            text = p.get_text().strip()
-            # Only take meaningful sentences (between 40 and 250 characters)
-            if 40 < len(text) < 250 and not any(x in text.lower() for x in ['subscribe', 'cookie', 'follow us']):
-                bullets.append(text)
-            if len(bullets) >= 3: break
+                    "Strict Rule: If the article's primary purpose is to evaluate a consumer product "
+                    "or encourage a purchase, set 'is_ad' to true. "
 
-        # Fallback if no bullets found
-        if not bullets:
-            bullets = ["Click the link to read the full coverage of this developing story."]
+                    "If it is genuine news (politics, tech industry trends, science, etc.), "
+                    "provide 3 concise bullet points. "
+                    "Return ONLY a JSON object: {'is_ad': bool, 'reason': string, 'bullets': []}"
+                )
+            },
+            {"role": "user", "content": f"Headline: {headline}\n\nText: {full_text}"}
+        ],
+        response_format={ "type": "json_object" }
+        )
+
+        result = json.loads(response.choices[0].message.content)
+
+        # Logic to skip
+        if result.get("is_ad") is True:
+            # Optional: Log the reason why the AI rejected it for debugging
+            print(f"REJECTED ({result.get('reason')}): {headline[:50]}")
+            return None
 
         return {
             "headline": headline.strip(),
             "image_url": image_url,
-            "bullets": bullets
+            "bullets": result.get("bullets", [])[:3]
         }
 
     except Exception as e:
-        print(f"Parsing error for {url}: {e}")
+        print(f"AI Filtering error for {url}: {e}")
         return None
