@@ -122,7 +122,7 @@ SOURCE_MAPPING = {
     "wired.com": "Wired"
 }
 
-async def generic_news_scraper(rss_urls, limit_per_feed=5):
+async def generic_news_scraper(rss_urls, limit_per_feed=15):
     while True:
         db = SessionLocal()
         try:
@@ -216,7 +216,7 @@ async def startup_event():
     def run_scraper():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(generic_news_scraper(feeds, limit_per_feed=5))
+        loop.run_until_complete(generic_news_scraper(feeds, limit_per_feed=15))
 
     # Start the thread
     scraper_thread = threading.Thread(target=run_scraper, daemon=True)
@@ -257,6 +257,8 @@ def read_posts(
     sort: str = "newest",
     category: Optional[str] = None,
     time: str = "all",
+    skip: int = 0,   # <--- ADD THIS
+    limit: int = 10,  # <--- ADD THIS
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
