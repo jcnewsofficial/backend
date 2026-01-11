@@ -40,7 +40,7 @@ class Comment(CommentBase):
 
 class PostBase(BaseModel):
     headline: str
-    image_url: str
+    image_url: Optional[str] = None
     category: str
     bullet_points: List[str]
     source_url: Optional[str] = None # Using str instead of HttpUrl for more flexibility with DB strings
