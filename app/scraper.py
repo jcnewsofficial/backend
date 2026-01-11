@@ -20,56 +20,54 @@ def auto_parse_news(url):
 
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        # 1. Scrape Headline & Image (Standard Metadata)
+        # 1. Scrape Headline & Image
         headline_tag = soup.find('h1') or soup.find('meta', property='og:title')
-        headline = headline_tag.get('content') if headline_tag.name == 'meta' else headline_tag.get_text()
+        headline = headline_tag.get('content') if headline_tag and headline_tag.name == 'meta' else headline_tag.get_text() if headline_tag else "Unknown Headline"
 
         img_tag = soup.find('meta', property='og:image')
         image_url = img_tag.get('content') if img_tag else None
 
-        # 2. Extract Body Text (First 1500 characters is usually enough for AI)
+        # 2. Extract Body Text
         all_paragraphs = soup.find_all('p')
         full_text = " ".join([p.get_text() for p in all_paragraphs[:8]])
 
-        # 3. AI Gatekeeper & Summarizer
-        # We ask for JSON so it's easy for Python to read the 'is_ad' flag
+        # 3. AI Categorization & Summarization
+        # We strictly define the allowed categories in the prompt
         response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are an elite news editor for a hard-news application. "
-                    "Your job is to filter out any content that is a: "
-                    "1. Product Review or Hands-on (e.g., 'Review: Fujifilm X-E5'). "
-                    "2. Product Roundup or Buying Guide (e.g., 'Best Mirrorless Cameras'). "
-                    "3. Sponsored post or Advertisement. "
-                    "4. Shopping deal or 'Price Drop' announcement. "
-
-                    "Strict Rule: If the article's primary purpose is to evaluate a consumer product "
-                    "or encourage a purchase, set 'is_ad' to true. "
-
-                    "If it is genuine news (politics, tech industry trends, science, etc.), "
-                    "provide 3 concise bullet points. "
-                    "Return ONLY a JSON object: {'is_ad': bool, 'reason': string, 'bullets': []}"
-                )
-            },
-            {"role": "user", "content": f"Headline: {headline}\n\nText: {full_text}"}
-        ],
-        response_format={ "type": "json_object" }
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a news classifier. Your tasks are:"
+                        "1. Identify if the text is an Advertisement, Product Review, or Shopping Guide. If so, set 'is_ad': true."
+                        "2. If it is real news, classify it into EXACTLY ONE of these categories: "
+                        "'World', 'Politics', 'Business', 'Tech', 'Sports', 'Entertainment', 'General'. "
+                        "   - If it doesn't fit the first 6, use 'General'."
+                        "3. Provide 3 short, punchy bullet points summarizing the story."
+                        "Return JSON: {'is_ad': bool, 'category': string, 'bullets': [str]}"
+                    )
+                },
+                {"role": "user", "content": f"Headline: {headline}\n\nText: {full_text[:2000]}"}
+            ],
+            response_format={ "type": "json_object" }
         )
 
         result = json.loads(response.choices[0].message.content)
 
-        # Logic to skip
         if result.get("is_ad") is True:
-            # Optional: Log the reason why the AI rejected it for debugging
-            print(f"REJECTED ({result.get('reason')}): {headline[:50]}")
             return None
+
+        # Validate category just in case AI hallucinates
+        valid_categories = ['World', 'Politics', 'Business', 'Tech', 'Sports', 'Entertainment', 'General']
+        category = result.get("category", "General")
+        if category not in valid_categories:
+            category = "General"
 
         return {
             "headline": headline.strip(),
             "image_url": image_url,
+            "category": category,  # <--- This is now the AI-determined category
             "bullets": result.get("bullets", [])[:3]
         }
 

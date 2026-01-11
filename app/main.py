@@ -164,11 +164,17 @@ async def generic_news_scraper(rss_urls, limit_per_feed=5):
                         new_post = models.Post(
                             headline=scraped_data["headline"],
                             image_url=scraped_data.get("image_url"),
-                            category=extract_category_from_url(link) or "General",
+
+                            # --- CHANGED THIS LINE ---
+                            # OLD: category=extract_category_from_url(link) or "General",
+                            # NEW: Use the category coming directly from the AI scraper
+                            category=scraped_data["category"],
+                            # -------------------------
+
                             bullet_points=scraped_data["bullets"],
                             url=link,
                             source_url=link,
-                            source_name=source_name, # Now defined!
+                            source_name=source_name,
                             created_at=pub_date
                         )
 
@@ -213,8 +219,8 @@ async def startup_event():
         loop.run_until_complete(generic_news_scraper(feeds, limit_per_feed=5))
 
     # Start the thread
-    #scraper_thread = threading.Thread(target=run_scraper, daemon=True)
-    #scraper_thread.start()
+    scraper_thread = threading.Thread(target=run_scraper, daemon=True)
+    scraper_thread.start()
 
 # --- AUTH ENDPOINTS ---
 
