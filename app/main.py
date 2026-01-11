@@ -277,19 +277,23 @@ def read_posts(
             query = query.filter(models.Post.created_at >= start_date)
 
     # 3. Apply Sorting
-    if sort == "liked":
-        # Sort by join count logic (keep your existing logic here if it works)
-        like_counts = db.query(
+    if sort in ["engagement", "liked"]:
+        # Calculate TOTAL engagement (Likes + Dislikes)
+        engagement_counts = db.query(
             models.Like.post_id,
-            func.count(models.Like.id).label('total_likes')
-        ).filter(models.Like.vote_type == 1).group_by(models.Like.post_id).subquery()
+            func.count(models.Like.id).label('total_engagement')
+        ).group_by(models.Like.post_id).subquery()
 
-        query = query.outerjoin(like_counts, models.Post.id == like_counts.c.post_id)
+        # Join the engagement subquery
+        query = query.outerjoin(engagement_counts, models.Post.id == engagement_counts.c.post_id)
+
+        # Order by total engagement first, then by date
         query = query.order_by(
-            desc(func.coalesce(like_counts.c.total_likes, 0)),
+            desc(func.coalesce(engagement_counts.c.total_engagement, 0)),
             desc(models.Post.created_at)
         )
     else:
+        # Default: Newest first
         query = query.order_by(desc(models.Post.created_at))
 
     # 4. Execute Query
