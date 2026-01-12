@@ -30,11 +30,17 @@ class Comment(CommentBase):
 
     # CHANGED: Instead of flat fields, we use the author relationship
     author: Optional[UserProfile] = None
+    score: int = 0         # Total (Likes - Dislikes)
+    user_vote: int = 0     # 1, -1, or 0 (what the current user did)
 
     replies: List['Comment'] = []
 
     class Config:
         from_attributes = True
+
+class CommentVoteResponse(BaseModel):
+    score: int
+    user_vote: int
 
 # --- POST (NEWS) SCHEMAS ---
 

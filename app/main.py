@@ -199,17 +199,38 @@ async def generic_news_scraper(rss_urls, limit_per_feed=15):
 @app.on_event("startup")
 async def startup_event():
     feeds = [
-        "https://www.cbc.ca/cmlink/rss-topstories",
-        "http://feeds.bbci.co.uk/news/rss.xml",
-        "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
-        "https://www.aljazeera.com/xml/rss/all.xml",
-        "https://www.theverge.com/rss/index.xml",
-        "https://feeds.feedburner.com/TechCrunch/",
-        "https://wired.com/feed/rss",
-        "https://search.cnbc.com/rs/search/view.xml?partnerId=2000&keywords=finance",
-        "http://feeds.marketwatch.com/marketwatch/topstories/",
-        "https://www.sciencedaily.com/rss/all.xml",
-        "https://rss.medicalnewstoday.com/featured.xml"
+        # --- WORLD & NEWS ---
+        "http://feeds.bbci.co.uk/news/world/rss.xml",           # BBC World
+        "https://www.aljazeera.com/xml/rss/all.xml",            # Al Jazeera
+        "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", # NYT World
+        "https://www.cbc.ca/webfeed/rss/rss-world",             # CBC World
+
+        # --- POLITICS ---
+        "http://rss.cnn.com/rss/cnn_allpolitics.rss",           # CNN Politics
+        "https://www.politico.com/rss/politicopicks.xml",       # Politico
+
+        # --- BUSINESS & FINANCE ---
+        "https://search.cnbc.com/rs/search/view.xml?partnerId=2000&keywords=finance", # CNBC
+        "https://feeds.npr.org/1006/rss.xml",                   # NPR Business
+
+        # --- TECH & FUTURE ---
+        "https://www.theverge.com/rss/index.xml",               # The Verge
+        "https://techcrunch.com/feed/",                         # TechCrunch
+        "https://www.wired.com/feed/rss",                       # Wired
+        "https://arstechnica.com/feed/",                        # Ars Technica
+
+        # --- SPORTS ---
+        "https://www.espn.com/espn/rss/news",                   # ESPN Top News
+        "https://api.foxsports.com/v1/rss?partnerKey=zBaFxRyGKCfxBagJG9b8pqLyndmvo7UU", # Fox Sports
+
+        # --- ENTERTAINMENT & CULTURE ---
+        "https://www.variety.com/feed/",                        # Variety
+        "https://www.hollywoodreporter.com/feed/",              # Hollywood Reporter
+        "https://www.billboard.com/feed/",                      # Billboard Music
+
+        # --- SCIENCE ---
+        "https://www.sciencedaily.com/rss/all.xml",             # Science Daily
+        "https://www.nasa.gov/rss/dyn/breaking_news.rss"        # NASA
     ]
 
     # Define a helper to run the async function in a new thread's loop
@@ -307,22 +328,24 @@ def read_posts(
     # 4. Execute Query
     posts = query.all()
 
+    # Define user ID once to use inside the loop
+    current_user_id = current_user.id if current_user else None
+
     # --- CRITICAL FIX: POPULATE COUNTS ---
-    # We must calculate counts for every post before returning
     for post in posts:
-        # Calculate Likes
+        # Calculate Post Likes (Existing)
         post.like_count = db.query(models.Like).filter(
             models.Like.post_id == post.id,
             models.Like.vote_type == 1
         ).count()
 
-        # Calculate Dislikes
+        # Calculate Post Dislikes (Existing)
         post.dislike_count = db.query(models.Like).filter(
             models.Like.post_id == post.id,
             models.Like.vote_type == -1
         ).count()
 
-        # Calculate User Vote (if logged in)
+        # Calculate Post User Vote (Existing)
         post.user_vote = 0
         if current_user:
             user_vote_obj = db.query(models.Like).filter(
@@ -331,6 +354,10 @@ def read_posts(
             ).first()
             if user_vote_obj:
                 post.user_vote = user_vote_obj.vote_type
+
+        # --- NEW: POPULATE SCORES FOR COMMENTS IN THE FEED ---
+        # This was missing! It ensures comments on the Home screen have likes.
+        populate_comment_scores(post.comments, db, current_user_id)
 
     return posts
 
@@ -393,6 +420,58 @@ def create_comment(
 
     return db_comment
 
+@app.post("/comments/{comment_id}/vote", response_model=schemas.CommentVoteResponse)
+def vote_comment(
+    comment_id: int,
+    vote_type: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # 1. Check if comment exists
+    comment = db.query(models.Comment).filter(models.Comment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    # 2. Check for existing vote
+    existing_vote = db.query(models.CommentLike).filter(
+        models.CommentLike.comment_id == comment_id,
+        models.CommentLike.user_id == current_user.id
+    ).first()
+
+    final_user_vote = vote_type
+
+    if existing_vote:
+        if existing_vote.vote_type == vote_type:
+            # Toggle off (remove vote if clicking same button)
+            db.delete(existing_vote)
+            final_user_vote = 0
+        else:
+            # Change vote (Like -> Dislike or vice versa)
+            existing_vote.vote_type = vote_type
+    else:
+        # Create new vote
+        new_vote = models.CommentLike(
+            user_id=current_user.id,
+            comment_id=comment_id,
+            vote_type=vote_type
+        )
+        db.add(new_vote)
+
+    db.commit()
+
+    # 3. Calculate new score to return immediately
+    likes = db.query(models.CommentLike).filter(
+        models.CommentLike.comment_id == comment_id,
+        models.CommentLike.vote_type == 1
+    ).count()
+
+    dislikes = db.query(models.CommentLike).filter(
+        models.CommentLike.comment_id == comment_id,
+        models.CommentLike.vote_type == -1
+    ).count()
+
+    return {"score": likes - dislikes, "user_vote": final_user_vote}
+
 @app.post("/posts/{post_id}/vote", response_model=schemas.VoteResponse)
 def vote_post(
     post_id: int,
@@ -432,13 +511,43 @@ def vote_post(
         "user_vote": final_user_vote
     }
 
+def populate_comment_scores(comments, db, current_user_id=None):
+    for comment in comments:
+        # 1. Get raw counts
+        likes = db.query(models.CommentLike).filter(
+            models.CommentLike.comment_id == comment.id,
+            models.CommentLike.vote_type == 1
+        ).count()
+
+        dislikes = db.query(models.CommentLike).filter(
+            models.CommentLike.comment_id == comment.id,
+            models.CommentLike.vote_type == -1
+        ).count()
+
+        # 2. Set the 'score' attribute (net sum)
+        comment.score = likes - dislikes
+
+        # 3. Check user status
+        comment.user_vote = 0
+        if current_user_id:
+            user_vote_obj = db.query(models.CommentLike).filter(
+                models.CommentLike.comment_id == comment.id,
+                models.CommentLike.user_id == current_user_id
+            ).first()
+            if user_vote_obj:
+                comment.user_vote = user_vote_obj.vote_type
+
+        # 4. Recursively process replies if they exist
+        if hasattr(comment, "replies") and comment.replies:
+             populate_comment_scores(comment.replies, db, current_user_id)
+
 @app.get("/posts/{post_id}", response_model=schemas.Post)
 def get_post(
     post_id: int,
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
-    # 1. Fetch post with comments and authors pre-loaded
+    # 1. Fetch post
     post = db.query(models.Post).options(
         joinedload(models.Post.comments).joinedload(models.Comment.author)
     ).filter(models.Post.id == post_id).first()
@@ -446,21 +555,28 @@ def get_post(
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
-    # 2. Increment view count (Logic for the "Most Viewed" sort)
+    # 2. Update views
     post.views = (post.views or 0) + 1
     db.commit()
     db.refresh(post)
 
-    # 3. Calculate social counts
+    # 3. Post Social Counts
     post.like_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == 1).count()
     post.dislike_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == -1).count()
 
-    # 4. Check if current user has voted
     post.user_vote = 0
+    current_user_id = current_user.id if current_user else None
+
     if current_user:
         vote = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.user_id == current_user.id).first()
         if vote:
             post.user_vote = vote.vote_type
+
+    # 4. NEW: Populate Comment Scores
+    # We only process top-level comments here to avoid double counting if recursion is handled by SQLAlchemy
+    # But strictly speaking, the `post.comments` list usually contains ALL comments flatly if not configured as a tree.
+    # To be safe, we iterate whatever `post.comments` returns.
+    populate_comment_scores(post.comments, db, current_user_id)
 
     return post
 

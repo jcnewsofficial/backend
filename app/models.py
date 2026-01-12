@@ -74,6 +74,20 @@ class Comment(Base):
             return self.author.avatar_version
         return 1
 
+class CommentLike(Base):
+    __tablename__ = "comment_likes"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    comment_id = Column(Integer, ForeignKey("comments.id"))
+    vote_type = Column(Integer) # 1 for Like, -1 for Dislike
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+    comment = relationship("Comment")
+
+    __table_args__ = (UniqueConstraint('user_id', 'comment_id', name='_user_comment_uc'),)
+
 class Like(Base):
     __tablename__ = "likes"
     id = Column(Integer, primary_key=True, index=True)
