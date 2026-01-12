@@ -19,6 +19,7 @@ from .models import User
 from fastapi.staticfiles import StaticFiles
 from time import mktime
 import threading
+import io
 
 import shutil
 import os
@@ -112,14 +113,82 @@ def get_links_from_rss(rss_url: str) -> List[str]:
 
 socket.setdefaulttimeout(15)
 
+# --- UPDATED SOURCE MAPPING ---
 SOURCE_MAPPING = {
+    # Major Global
     "cbc.ca": "CBC News",
     "bbc.co.uk": "BBC News",
+    "bbc.com": "BBC News",
     "nytimes.com": "NY Times",
     "aljazeera.com": "Al Jazeera",
+    "reuters.com": "Reuters",
+    "apnews.com": "AP News",
+    "cnn.com": "CNN",
+    "foxnews.com": "Fox News",
+    "nbcnews.com": "NBC News",
+    "washingtonpost.com": "Washington Post",
+    "guardian.co.uk": "The Guardian",
+    "theguardian.com": "The Guardian",
+    "usatoday.com": "USA Today",
+    "dw.com": "Deutsche Welle",
+    "france24.com": "France 24",
+
+    # Tech & Science
     "theverge.com": "The Verge",
     "techcrunch.com": "TechCrunch",
-    "wired.com": "Wired"
+    "wired.com": "Wired",
+    "arstechnica.com": "Ars Technica",
+    "engadget.com": "Engadget",
+    "gizmodo.com": "Gizmodo",
+    "mashable.com": "Mashable",
+    "cnet.com": "CNET",
+    "venturebeat.com": "VentureBeat",
+    "sciencedaily.com": "Science Daily",
+    "space.com": "Space.com",
+    "nasa.gov": "NASA",
+    "scientificamerican.com": "Scientific American",
+
+    # Business
+    "cnbc.com": "CNBC",
+    "bloomberg.com": "Bloomberg",
+    "forbes.com": "Forbes",
+    "wsj.com": "Wall Street Journal",
+    "businessinsider.com": "Business Insider",
+    "ft.com": "Financial Times",
+    "economist.com": "The Economist",
+    "marketwatch.com": "MarketWatch",
+
+    # Sports
+    "espn.com": "ESPN",
+    "bleacherreport.com": "Bleacher Report",
+    "cbssports.com": "CBS Sports",
+    "si.com": "Sports Illustrated",
+    "nba.com": "NBA",
+    "nfl.com": "NFL",
+    "skysports.com": "Sky Sports",
+
+    # Entertainment & Lifestyle
+    "variety.com": "Variety",
+    "hollywoodreporter.com": "Hollywood Reporter",
+    "deadline.com": "Deadline",
+    "rollingstone.com": "Rolling Stone",
+    "billboard.com": "Billboard",
+    "people.com": "People",
+    "tmz.com": "TMZ",
+    "ign.com": "IGN",
+    "polygon.com": "Polygon",
+    "kotaku.com": "Kotaku",
+    "gamespot.com": "GameSpot",
+    "eurogamer.net": "Eurogamer",
+
+    # Crypto
+    "coindesk.com": "CoinDesk",
+    "cointelegraph.com": "CoinTelegraph",
+    "decrypt.co": "Decrypt",
+}
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
 
 async def generic_news_scraper(rss_urls, limit_per_feed=15):
@@ -138,11 +207,26 @@ async def generic_news_scraper(rss_urls, limit_per_feed=15):
 
                     print(f"Fetching: {rss_url} ({source_name})")
 
-                    loop = asyncio.get_event_loop()
-                    feed = await loop.run_in_executor(None, lambda: feedparser.parse(rss_url))
+                    try:
+                        response = requests.get(rss_url, headers=HEADERS, timeout=10)
+                        if response.status_code != 200:
+                            print(f"Skipping {rss_url}: Status {response.status_code}")
+                            continue
+                        content = io.BytesIO(response.content)
+
+                        # Pass the downloaded content to feedparser
+                        loop = asyncio.get_event_loop()
+                        feed = await loop.run_in_executor(None, lambda: feedparser.parse(content))
+
+                    except requests.exceptions.Timeout:
+                        print(f"Timeout skipping {rss_url}")
+                        continue
+                    except Exception as net_err:
+                        print(f"Network error on {rss_url}: {net_err}")
+                        continue
 
                     if feed.get('bozo'):
-                        print(f"Warning: Feed issue with {rss_url}")
+                        print(f"Warning: Malformed feed data from {rss_url}")
 
                     entries = feed.entries[:limit_per_feed]
                     for entry in entries:
@@ -164,13 +248,7 @@ async def generic_news_scraper(rss_urls, limit_per_feed=15):
                         new_post = models.Post(
                             headline=scraped_data["headline"],
                             image_url=scraped_data.get("image_url"),
-
-                            # --- CHANGED THIS LINE ---
-                            # OLD: category=extract_category_from_url(link) or "General",
-                            # NEW: Use the category coming directly from the AI scraper
                             category=scraped_data["category"],
-                            # -------------------------
-
                             bullet_points=scraped_data["bullets"],
                             url=link,
                             source_url=link,
@@ -199,38 +277,70 @@ async def generic_news_scraper(rss_urls, limit_per_feed=15):
 @app.on_event("startup")
 async def startup_event():
     feeds = [
-        # --- WORLD & NEWS ---
+        # --- WORLD & MAJOR NEWS ---
         "http://feeds.bbci.co.uk/news/world/rss.xml",           # BBC World
         "https://www.aljazeera.com/xml/rss/all.xml",            # Al Jazeera
         "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", # NYT World
         "https://www.cbc.ca/webfeed/rss/rss-world",             # CBC World
+        "http://feeds.washingtonpost.com/rss/world",            # WaPo World
+        "https://www.theguardian.com/world/rss",                # The Guardian
+        "https://rss.dw.com/xml/rss-en-all",                    # Deutsche Welle
+        "https://www.france24.com/en/rss",                      # France 24
 
         # --- POLITICS ---
         "http://rss.cnn.com/rss/cnn_allpolitics.rss",           # CNN Politics
         "https://www.politico.com/rss/politicopicks.xml",       # Politico
+        "https://feeds.npr.org/1014/rss.xml",                   # NPR Politics
+        "https://thehill.com/feed/",                            # The Hill
 
         # --- BUSINESS & FINANCE ---
         "https://search.cnbc.com/rs/search/view.xml?partnerId=2000&keywords=finance", # CNBC
         "https://feeds.npr.org/1006/rss.xml",                   # NPR Business
+        "https://feeds.bloomberg.com/markets/news.rss",         # Bloomberg Markets
+        "https://www.economist.com/business/rss.xml",           # The Economist
+        "http://feeds.marketwatch.com/marketwatch/topstories/", # MarketWatch
 
         # --- TECH & FUTURE ---
         "https://www.theverge.com/rss/index.xml",               # The Verge
         "https://techcrunch.com/feed/",                         # TechCrunch
         "https://www.wired.com/feed/rss",                       # Wired
         "https://arstechnica.com/feed/",                        # Ars Technica
+        "https://www.engadget.com/rss.xml",                     # Engadget
+        "https://gizmodo.com/rss",                              # Gizmodo
+        "https://mashable.com/feeds/rss/tech",                  # Mashable Tech
+        "https://venturebeat.com/feed/",                        # VentureBeat
+
+        # --- GAMING ---
+        "https://www.ign.com/rss/articles.xml",                 # IGN
+        "https://www.polygon.com/rss/index.xml",                # Polygon
+        "https://kotaku.com/rss",                               # Kotaku
+        "https://www.gamespot.com/feeds/news/",                 # GameSpot
+        "https://www.eurogamer.net/?format=rss",                # Eurogamer
 
         # --- SPORTS ---
         "https://www.espn.com/espn/rss/news",                   # ESPN Top News
         "https://api.foxsports.com/v1/rss?partnerKey=zBaFxRyGKCfxBagJG9b8pqLyndmvo7UU", # Fox Sports
+        "https://sports.yahoo.com/rss/",                        # Yahoo Sports
+        "https://www.cbssports.com/rss/headlines/",             # CBS Sports
 
         # --- ENTERTAINMENT & CULTURE ---
         "https://www.variety.com/feed/",                        # Variety
         "https://www.hollywoodreporter.com/feed/",              # Hollywood Reporter
+        "https://deadline.com/feed/",                           # Deadline
+        "https://www.rollingstone.com/feed/",                   # Rolling Stone
         "https://www.billboard.com/feed/",                      # Billboard Music
+        "https://people.com/feed/",                             # People
 
-        # --- SCIENCE ---
+        # --- SCIENCE & SPACE ---
         "https://www.sciencedaily.com/rss/all.xml",             # Science Daily
-        "https://www.nasa.gov/rss/dyn/breaking_news.rss"        # NASA
+        "https://www.nasa.gov/rss/dyn/breaking_news.rss",       # NASA
+        "https://www.scientificamerican.com/feed.xml",          # Scientific American
+        "https://www.space.com/feeds/all",                      # Space.com
+
+        # --- CRYPTO ---
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",      # CoinDesk
+        "https://cointelegraph.com/rss",                        # CoinTelegraph
+        "https://decrypt.co/feed"                               # Decrypt
     ]
 
     # Define a helper to run the async function in a new thread's loop
