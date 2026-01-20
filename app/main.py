@@ -350,8 +350,8 @@ async def startup_event():
         loop.run_until_complete(generic_news_scraper(feeds, limit_per_feed=15))
 
     # Start the thread
-    scraper_thread = threading.Thread(target=run_scraper, daemon=True)
-    scraper_thread.start()
+    #scraper_thread = threading.Thread(target=run_scraper, daemon=True)
+    #scraper_thread.start()
 
 # --- AUTH ENDPOINTS ---
 
@@ -939,6 +939,24 @@ def get_friends_activity(
         })
 
     return results
+
+@app.get("/users/{user_id}")
+def get_user_profile(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "id": user.id,
+        "username": user.username,
+        # We exclude email for privacy since this is a public profile view
+        "avatar_url": user.avatar_url,
+        "avatar_version": user.avatar_version or 1
+    }
 
 @app.post("/users/me/avatar")
 async def upload_avatar(
