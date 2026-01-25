@@ -56,6 +56,8 @@ class Comment(Base):
     parent = relationship("Comment", remote_side=[id], back_populates="replies")
     replies = relationship("Comment", back_populates="parent", cascade="all, delete-orphan")
 
+    is_edited = Column(Boolean, default=False)
+
     @property
     def username(self) -> str:
         if self.author:

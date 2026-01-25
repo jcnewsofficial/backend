@@ -1,6 +1,6 @@
 import asyncio
 import feedparser
-from fastapi import FastAPI, Depends, HTTPException, Response, status, Header, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Response, status, Header, UploadFile, File, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, func, or_
@@ -582,6 +582,31 @@ def vote_comment(
 
     return {"score": likes - dislikes, "user_vote": final_user_vote}
 
+@app.put("/comments/{comment_id}")
+def update_comment(
+    comment_id: int,
+    payload: dict = Body(...), # Expects {"content": "New text"}
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    comment = db.query(models.Comment).filter(models.Comment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    # Check ownership
+    if comment.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to edit this comment")
+
+    new_content = payload.get("content")
+    if not new_content or not new_content.strip():
+        raise HTTPException(status_code=400, detail="Content cannot be empty")
+
+    comment.content = new_content
+    comment.is_edited = True # Set the flag
+    db.commit()
+
+    return comment
+
 @app.post("/posts/{post_id}/vote", response_model=schemas.VoteResponse)
 def vote_post(
     post_id: int,
@@ -967,8 +992,7 @@ async def upload_avatar(
     upload_dir = "static/avatars"
     os.makedirs(upload_dir, exist_ok=True)
 
-    # 1. CLEANUP: Delete old files for this user to save space
-    # Look for any file starting with "user_{id}." regardless of extension (jpg, png, etc.)
+    # 1. CLEANUP: (Keep this part exactly as it is)
     search_pattern = os.path.join(upload_dir, f"user_{current_user.id}.*")
     old_files = glob.glob(search_pattern)
 
@@ -979,23 +1003,26 @@ async def upload_avatar(
         except Exception as e:
             print(f"Error deleting old avatar: {e}")
 
-    # 2. Create a unique filename for the NEW file
+    # 2. Filename Logic (Keep this)
     extension = os.path.splitext(file.filename)[1].lower()
-    if not extension: extension = ".jpg" # Fallback
+    if not extension: extension = ".jpg"
     unique_filename = f"user_{current_user.id}{extension}"
     file_location = os.path.join(upload_dir, unique_filename)
 
-    # 3. Save the new file
+    # 3. SAVE THE NEW FILE (Updated Fix)
     try:
-        # Reset file pointer to the beginning before copying
-        await file.seek(0)
-        with open(file_location, "wb+") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # FIX: Use await file.read() instead of mixing seek/shutil
+        # This ensures the file is fully received before writing
+        contents = await file.read()
+
+        with open(file_location, "wb") as buffer:
+            buffer.write(contents)
+
     except Exception as e:
         print(f"File Save Error: {e}")
         raise HTTPException(status_code=500, detail="Could not save file to disk")
 
-    # 4. Update Database and Increment Version for Cache Busting
+    # 4. Update Database (Keep this)
     avatar_path = f"/static/avatars/{unique_filename}"
     current_user.avatar_url = avatar_path
     current_user.avatar_version = (current_user.avatar_version or 0) + 1
