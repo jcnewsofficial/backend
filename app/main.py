@@ -582,6 +582,38 @@ def vote_comment(
 
     return {"score": likes - dislikes, "user_vote": final_user_vote}
 
+@app.delete("/comments/{comment_id}")
+def delete_comment(
+    comment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # 1. Find the comment
+    comment = db.query(models.Comment).filter(models.Comment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    # 2. Check ownership
+    if comment.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this comment")
+
+    # 3. Check for replies (children)
+    # We look for any comment whose parent_id matches this comment's ID
+    has_replies = db.query(models.Comment).filter(models.Comment.parent_id == comment_id).count() > 0
+
+    if has_replies:
+        # SOFT DELETE: Keep structure, hide content
+        comment.content = "[deleted]"
+        comment.user_id = None # Remove link to user
+        # comment.is_deleted = True # Optional: If you added a flag column
+        db.commit()
+        return {"status": "soft_deleted", "id": comment_id}
+    else:
+        # HARD DELETE: No children, safe to remove completely
+        db.delete(comment)
+        db.commit()
+        return {"status": "hard_deleted", "id": comment_id}
+
 @app.put("/comments/{comment_id}")
 def update_comment(
     comment_id: int,

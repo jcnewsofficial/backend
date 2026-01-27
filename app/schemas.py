@@ -23,7 +23,7 @@ class CommentCreate(CommentBase):
 
 class Comment(CommentBase):
     id: int
-    user_id: int
+    user_id: Optional[int] = None
     post_id: int
     parent_id: Optional[int] = None
     timestamp: Optional[datetime] = None
@@ -32,6 +32,7 @@ class Comment(CommentBase):
     author: Optional[UserProfile] = None
     score: int = 0         # Total (Likes - Dislikes)
     user_vote: int = 0     # 1, -1, or 0 (what the current user did)
+    is_edited: bool = False
 
     replies: List['Comment'] = []
 
