@@ -5,7 +5,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, func, or_
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from . import models, schemas, database
@@ -794,6 +794,33 @@ def get_conversation(
             "timestamp": m.timestamp.isoformat()
         } for m in messages
     ]
+
+@app.post("/users/checkin")
+def daily_checkin(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    today = date.today()
+
+    # 1. Check if already checked in today
+    if current_user.last_checkin == today:
+        return {
+            "status": "already_checked_in",
+            "count": current_user.checkin_count,
+            "new_checkin": False
+        }
+
+    # 2. Update User
+    current_user.last_checkin = today
+    current_user.checkin_count = (current_user.checkin_count or 0) + 1
+
+    db.commit()
+
+    return {
+        "status": "success",
+        "count": current_user.checkin_count,
+        "new_checkin": True
+    }
 
 @app.get("/users/me")
 def get_me(current_user: models.User = Depends(get_current_user)):

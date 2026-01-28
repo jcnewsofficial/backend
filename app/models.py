@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON, DateTime, UniqueConstraint, Text
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON, DateTime, UniqueConstraint, Text, Date
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -18,6 +18,8 @@ class User(Base):
     likes = relationship("Like", back_populates="user")
     avatar_url = Column(String, nullable=True)
     avatar_version = Column(Integer, default=1)
+    checkin_count = Column(Integer, default=0)
+    last_checkin = Column(Date, nullable=True)
 
 class Post(Base):
     __tablename__ = "posts"
