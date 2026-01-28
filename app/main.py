@@ -829,7 +829,8 @@ def get_me(current_user: models.User = Depends(get_current_user)):
         "username": current_user.username,
         "email": current_user.email,
         "avatar_url": current_user.avatar_url,
-        "avatar_version": current_user.avatar_version or 1 # Key for cache busting
+        "avatar_version": current_user.avatar_version or 1,
+        "checkin_count": current_user.checkin_count or 0 # Key for cache busting
     }
 
 @app.get("/messages/inbox")
@@ -1039,7 +1040,8 @@ def get_user_profile(
         "username": user.username,
         # We exclude email for privacy since this is a public profile view
         "avatar_url": user.avatar_url,
-        "avatar_version": user.avatar_version or 1
+        "avatar_version": user.avatar_version or 1,
+        "checkin_count": user.checkin_count or 0
     }
 
 @app.post("/users/me/avatar")
