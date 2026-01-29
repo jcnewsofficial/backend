@@ -131,3 +131,20 @@ class Friendship(Base):
     # Relationships
     requester = relationship("User", foreign_keys=[user_id])
     receiver = relationship("User", foreign_keys=[friend_id])
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))   # Who receives the notification (You)
+    sender_id = Column(Integer, ForeignKey("users.id")) # Who tagged you
+    post_id = Column(Integer, ForeignKey("posts.id"))   # Which post
+    comment_id = Column(Integer, ForeignKey("comments.id"), nullable=True)
+    type = Column(String) # 'mention', 'like', etc.
+    is_read = Column(Boolean, default=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id], backref="notifications")
+    sender = relationship("User", foreign_keys=[sender_id])
+    post = relationship("Post")

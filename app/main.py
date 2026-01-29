@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from time import mktime
 import threading
 import io
+import re
 
 import shutil
 import os
@@ -509,11 +510,13 @@ def search_news(
 # --- SOCIAL ENDPOINTS ---
 
 @app.post("/comments", response_model=schemas.Comment)
+@app.post("/comments", response_model=schemas.Comment)
 def create_comment(
     comment: schemas.CommentCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    # 1. Create Comment
     new_comment = models.Comment(
         content=comment.content,
         post_id=comment.post_id,
@@ -523,7 +526,33 @@ def create_comment(
     db.add(new_comment)
     db.commit()
 
-    # Eagerly load the author so the response includes username/avatar_url
+    # 2. DETECT MENTIONS (New Logic)
+    # Regex finds words starting with @ (e.g., @john)
+    mentioned_usernames = re.findall(r"@(\w+)", comment.content)
+
+    # Remove duplicates to avoid spamming the same user multiple times in one comment
+    unique_mentions = set(mentioned_usernames)
+
+    for username in unique_mentions:
+        # Find the user
+        target_user = db.query(models.User).filter(models.User.username == username).first()
+
+        # Don't notify yourself
+        if target_user and target_user.id != current_user.id:
+            notification = models.Notification(
+                user_id=target_user.id,
+                sender_id=current_user.id,
+                post_id=comment.post_id,
+                comment_id=new_comment.id,
+                type="mention",
+                timestamp=datetime.utcnow()
+            )
+            db.add(notification)
+            print(f"Notification created for {target_user.username}")
+
+    db.commit()
+
+    # Eagerly load the author
     db_comment = db.query(models.Comment).options(
         joinedload(models.Comment.author)
     ).filter(models.Comment.id == new_comment.id).first()
@@ -991,7 +1020,31 @@ def get_friends_activity(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    # 1. Get List of Friend IDs (same as before)
+    results = []
+
+    # 1. FETCH MENTIONS (New)
+    # "Who mentioned ME?"
+    mentions = db.query(models.Notification).options(
+        joinedload(models.Notification.sender),
+        joinedload(models.Notification.post)
+    ).filter(
+        models.Notification.user_id == current_user.id,
+        models.Notification.type == "mention"
+    ).order_by(models.Notification.timestamp.desc()).limit(20).all()
+
+    for notif in mentions:
+        results.append({
+            "username": notif.sender.username,
+            "avatar_url": notif.sender.avatar_url,
+            "avatar_version": notif.sender.avatar_version or 1,
+            "action": "mentioned you in", # Special string we will check in frontend
+            "post_id": notif.post_id,
+            "post_title": notif.post.headline if notif.post else "a comment",
+            "timestamp": notif.timestamp
+        })
+
+    # 2. FETCH FRIEND ACTIVITY (Existing Logic)
+    # "What did my friends do?"
     friendships = db.query(models.Friendship).filter(
         (models.Friendship.user_id == current_user.id) | (models.Friendship.friend_id == current_user.id),
         models.Friendship.status == 'accepted'
@@ -1001,27 +1054,27 @@ def get_friends_activity(
     for f in friendships:
         friend_ids.append(f.friend_id if f.user_id == current_user.id else f.user_id)
 
-    if not friend_ids:
-        return []
+    if friend_ids:
+        activities = db.query(models.Like).options(
+            joinedload(models.Like.user),
+            joinedload(models.Like.post)
+        ).filter(
+            models.Like.user_id.in_(friend_ids)
+        ).order_by(models.Like.created_at.desc()).limit(20).all()
 
-    # 2. FIXED QUERY: Use .in_(friend_ids) instead of (...)
-    activities = db.query(models.Like).options(
-        joinedload(models.Like.user),
-        joinedload(models.Like.post)
-    ).filter(
-        models.Like.user_id.in_(friend_ids)  # <--- FIX IS HERE
-    ).order_by(models.Like.created_at.desc()).limit(20).all()
+        for act in activities:
+            results.append({
+                "username": act.user.username,
+                "avatar_url": act.user.avatar_url,
+                "avatar_version": act.user.avatar_version or 1,
+                "action": "liked" if act.vote_type == 1 else "disliked",
+                "post_id": act.post.id if act.post else None,
+                "post_title": act.post.headline if act.post else "a post",
+                "timestamp": act.created_at
+            })
 
-    results = []
-    for act in activities:
-        results.append({
-            "username": act.user.username,
-            "avatar_url": act.user.avatar_url,  # <--- ADD THIS
-            "action": "liked" if act.vote_type == 1 else "disliked",
-            "post_id": act.post.id if act.post else None, # Helpful for navigation
-            "post_title": act.post.headline if act.post else "a post",
-            "timestamp": act.created_at
-        })
+    # 3. Sort combined list by date
+    results.sort(key=lambda x: x['timestamp'], reverse=True)
 
     return results
 
