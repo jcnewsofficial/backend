@@ -510,13 +510,12 @@ def search_news(
 # --- SOCIAL ENDPOINTS ---
 
 @app.post("/comments", response_model=schemas.Comment)
-@app.post("/comments", response_model=schemas.Comment)
 def create_comment(
     comment: schemas.CommentCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    # 1. Create Comment
+    # 1. Create Comment (Standard logic)
     new_comment = models.Comment(
         content=comment.content,
         post_id=comment.post_id,
@@ -526,16 +525,18 @@ def create_comment(
     db.add(new_comment)
     db.commit()
 
-    # 2. DETECT MENTIONS (New Logic)
-    # Regex finds words starting with @ (e.g., @john)
+    # 2. DETECT MENTIONS (Fixed Logic)
+    # Regex finds words starting with @
     mentioned_usernames = re.findall(r"@(\w+)", comment.content)
 
-    # Remove duplicates to avoid spamming the same user multiple times in one comment
     unique_mentions = set(mentioned_usernames)
 
     for username in unique_mentions:
-        # Find the user
-        target_user = db.query(models.User).filter(models.User.username == username).first()
+        # FIX: Use .ilike() for case-insensitive search
+        # This matches @james to "James", "JAMES", or "james"
+        target_user = db.query(models.User).filter(
+            models.User.username.ilike(username)
+        ).first()
 
         # Don't notify yourself
         if target_user and target_user.id != current_user.id:
@@ -552,7 +553,7 @@ def create_comment(
 
     db.commit()
 
-    # Eagerly load the author
+    # Eagerly load the author for the return
     db_comment = db.query(models.Comment).options(
         joinedload(models.Comment.author)
     ).filter(models.Comment.id == new_comment.id).first()
