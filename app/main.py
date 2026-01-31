@@ -3,7 +3,7 @@ import feedparser
 from fastapi import FastAPI, Depends, HTTPException, Response, status, Header, UploadFile, File, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc, func, or_
+from sqlalchemy import desc, func, or_, case, cast, Float
 from typing import List, Optional
 from datetime import datetime, timedelta, date
 from jose import JWTError, jwt
@@ -389,11 +389,100 @@ def read_posts(
     sort: str = "newest",
     category: Optional[str] = None,
     time: str = "all",
-    skip: int = 0,   # <--- ADD THIS
-    limit: int = 10,  # <--- ADD THIS
+    skip: int = 0,
+    limit: int = 10,
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
+    # 1. Start Query
+    query = db.query(models.Post).options(
+        joinedload(models.Post.comments).joinedload(models.Comment.author)
+    )
+
+    # 2. Filters (Category & Time)
+    if category and category.strip() != "" and category.lower() != "all":
+        query = query.filter(models.Post.category.ilike(category))
+
+    if time != "all":
+        now = datetime.utcnow()
+        start_date = None
+        if time == "24h":
+            start_date = now - timedelta(hours=24)
+        elif time == "week":
+            start_date = now - timedelta(weeks=1)
+        elif time == "month":
+            start_date = now - timedelta(days=30)
+
+        if start_date:
+            query = query.filter(models.Post.created_at >= start_date)
+
+    # 3. Apply Sorting
+    if sort in ["hot", "top", "controversial", "engagement"]:
+        # Subquery: Calculate Net Score (Likes - Dislikes) and Total Votes
+        vote_stats = db.query(
+            models.Like.post_id,
+            func.sum(models.Like.vote_type).label('net_score'),
+            func.count(models.Like.id).label('total_votes')
+        ).group_by(models.Like.post_id).subquery()
+
+        # Join stats to main query
+        query = query.outerjoin(vote_stats, models.Post.id == vote_stats.c.post_id)
+
+        # Helper variables for SQL logic
+        net_score = func.coalesce(vote_stats.c.net_score, 0)
+        total_votes = func.coalesce(vote_stats.c.total_votes, 0)
+
+        if sort == "hot" or sort == "engagement":
+            # --- REDDIT HOT ALGORITHM ---
+            # 1. Order Magnitude: log10(max(|score|, 1))
+            order_magnitude = func.log(10, func.greatest(func.abs(net_score), 1))
+
+            # 2. Sign: 1 if positive, -1 if negative.
+            # We treat 0 as 1 so new posts (score 0) don't get zeroed out by time.
+            sign = case((net_score < 0, -1), else_=1)
+
+            # 3. Seconds: Time since Reddit Epoch (Dec 8 2005)
+            # Using 1134028003 as constant
+            seconds = func.extract('epoch', models.Post.created_at) - 1134028003
+
+            # 4. Formula: val + (sign * seconds / 45000)
+            hot_score = cast(order_magnitude, Float) + (cast(sign, Float) * cast(seconds, Float) / 45000.0)
+
+            query = query.order_by(desc(hot_score))
+
+        elif sort == "top":
+            # TOP: Highest Net Score
+            query = query.order_by(desc(net_score), desc(models.Post.created_at))
+
+        elif sort == "controversial":
+            # CONTROVERSIAL: High Total Votes but Net Score close to 0
+            # Logic: Order by Total Votes DESC, then Absolute Net Score ASC
+            query = query.order_by(desc(total_votes), func.abs(net_score))
+
+    else:
+        # Default: Newest first
+        query = query.order_by(desc(models.Post.created_at))
+
+    # 4. Pagination
+    query = query.offset(skip).limit(limit)
+    posts = query.all()
+
+    current_user_id = current_user.id if current_user else None
+
+    # 5. Populate local counts (Python side for accuracy on returned items)
+    for post in posts:
+        post.like_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == 1).count()
+        post.dislike_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == -1).count()
+
+        post.user_vote = 0
+        if current_user:
+            user_vote_obj = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.user_id == current_user.id).first()
+            if user_vote_obj:
+                post.user_vote = user_vote_obj.vote_type
+
+        populate_comment_scores(post.comments, db, current_user_id)
+
+    return posts
     # 1. Start Query
     query = db.query(models.Post).options(
         joinedload(models.Post.comments).joinedload(models.Comment.author)
