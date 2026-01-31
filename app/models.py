@@ -45,6 +45,8 @@ class Comment(Base):
     post_id = Column(Integer, ForeignKey("posts.id"))
     user_id = Column(Integer, ForeignKey("users.id"))
 
+    image_url = Column(String, nullable=True)
+
     # NEW: Self-referencing relationship
     parent_id = Column(Integer, ForeignKey("comments.id"), nullable=True)
 

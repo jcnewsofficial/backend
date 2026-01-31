@@ -28,6 +28,8 @@ class Comment(CommentBase):
     parent_id: Optional[int] = None
     timestamp: Optional[datetime] = None
 
+    image_url: Optional[str] = None
+
     # CHANGED: Instead of flat fields, we use the author relationship
     author: Optional[UserProfile] = None
     score: int = 0         # Total (Likes - Dislikes)

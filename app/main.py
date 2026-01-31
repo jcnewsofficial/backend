@@ -21,6 +21,8 @@ from time import mktime
 import threading
 import io
 import re
+from fastapi import File, UploadFile, Form # Add these
+import uuid # Add this
 
 import shutil
 import os
@@ -599,50 +601,64 @@ def search_news(
 # --- SOCIAL ENDPOINTS ---
 
 @app.post("/comments", response_model=schemas.Comment)
-def create_comment(
-    comment: schemas.CommentCreate,
+async def create_comment(
+    content: str = Form(...),
+    post_id: int = Form(...),
+    parent_id: Optional[int] = Form(None),
+    image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    # 1. Create Comment (Standard logic)
+    # 1. Handle Image Upload
+    image_path = None
+    if image:
+        upload_dir = "static/comment_images"
+        os.makedirs(upload_dir, exist_ok=True)
+
+        ext = os.path.splitext(image.filename)[1]
+        filename = f"{uuid.uuid4()}{ext}"
+        file_location = os.path.join(upload_dir, filename)
+
+        with open(file_location, "wb") as buffer:
+            shutil.copyfileobj(image.file, buffer)
+
+        image_path = f"/static/comment_images/{filename}"
+
+    # 2. Create Comment
     new_comment = models.Comment(
-        content=comment.content,
-        post_id=comment.post_id,
+        content=content,
+        post_id=post_id,
+        parent_id=parent_id,
         user_id=current_user.id,
-        parent_id=comment.parent_id
+        image_url=image_path
     )
     db.add(new_comment)
     db.commit()
 
-    # 2. DETECT MENTIONS (Fixed Logic)
-    # Regex finds words starting with @
-    mentioned_usernames = re.findall(r"@(\w+)", comment.content)
+    # 3. DETECT MENTIONS (FIXED)
+    # Use 'content' directly, not 'comment.content'
+    mentioned_usernames = re.findall(r"@(\w+)", content)
 
     unique_mentions = set(mentioned_usernames)
 
     for username in unique_mentions:
-        # FIX: Use .ilike() for case-insensitive search
-        # This matches @james to "James", "JAMES", or "james"
         target_user = db.query(models.User).filter(
             models.User.username.ilike(username)
         ).first()
 
-        # Don't notify yourself
         if target_user and target_user.id != current_user.id:
             notification = models.Notification(
                 user_id=target_user.id,
                 sender_id=current_user.id,
-                post_id=comment.post_id,
+                post_id=post_id, # Use 'post_id' directly, not 'comment.post_id'
                 comment_id=new_comment.id,
                 type="mention",
                 timestamp=datetime.utcnow()
             )
             db.add(notification)
-            print(f"Notification created for {target_user.username}")
 
     db.commit()
 
-    # Eagerly load the author for the return
     db_comment = db.query(models.Comment).options(
         joinedload(models.Comment.author)
     ).filter(models.Comment.id == new_comment.id).first()
