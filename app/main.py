@@ -31,8 +31,8 @@ import socket
 
 
 # --- SECURITY CONFIGURATION ---
-SECRET_KEY = "DEVELOPMENT_SECRET_KEY_CHANGE_THIS_IN_PRODUCTION"
-ALGORITHM = "HS256"
+SECRET_KEY = os.getenv("SECRET_KEY", "fallback_dev_key_only")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -42,7 +42,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI(title="JC News Backend")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,
