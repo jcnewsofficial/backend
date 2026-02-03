@@ -612,7 +612,7 @@ async def create_comment(
     # 1. Handle Image Upload (Keep existing logic)
     image_path = None
     if image:
-        upload_dir = "static/comment_images"
+        upload_dir = "app/static/comment_images"
         os.makedirs(upload_dir, exist_ok=True)
         ext = os.path.splitext(image.filename)[1]
         filename = f"{uuid.uuid4()}{ext}"
@@ -1220,7 +1220,7 @@ async def upload_avatar(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    upload_dir = "static/avatars"
+    upload_dir = "app/static/avatars"
     os.makedirs(upload_dir, exist_ok=True)
 
     # 1. CLEANUP: (Keep this part exactly as it is)
