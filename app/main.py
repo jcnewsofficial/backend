@@ -566,37 +566,88 @@ def read_posts(
 @app.get("/news/search")
 def search_news(
     q: Optional[str] = None,
-    category: Optional[str] = None,
-    time: Optional[str] = "all", # Options: "24h", "week", "month", "all"
+    sort: str = "relevance",
+    time: str = "all",
+    skip: int = 0,   # <--- Added
+    limit: int = 10, # <--- Added (Default 10)
     db: Session = Depends(get_db)
 ):
-    # 1. Start with a base query on the Post model
     query = db.query(models.Post)
 
-    # 2. Filter by Keyword (Headline)
     if q:
         query = query.filter(models.Post.headline.ilike(f"%{q}%"))
 
-    # 3. Filter by Category
-    if category and category != "All":
-        query = query.filter(models.Post.category == category)
+    # Time Filter
+    now = datetime.utcnow()
+    if time == "hour":
+        query = query.filter(models.Post.created_at >= now - timedelta(hours=1))
+    elif time == "day":
+        query = query.filter(models.Post.created_at >= now - timedelta(hours=24))
+    elif time == "week":
+        query = query.filter(models.Post.created_at >= now - timedelta(weeks=1))
+    elif time == "month":
+        query = query.filter(models.Post.created_at >= now - timedelta(days=30))
+    elif time == "year":
+        query = query.filter(models.Post.created_at >= now - timedelta(days=365))
 
-    # 4. Filter by Time Range
-    if time != "all":
-        now = datetime.utcnow()
-        if time == "24h":
-            start_date = now - timedelta(hours=24)
-        elif time == "week":
-            start_date = now - timedelta(days=7)
-        elif time == "month":
-            start_date = now - timedelta(days=30)
+    # Sort Logic
+    if sort == "new":
+        query = query.order_by(desc(models.Post.created_at))
+    elif sort == "top":
+        subquery = db.query(models.Like.post_id, func.count(models.Like.id).label('like_count')).filter(models.Like.vote_type == 1).group_by(models.Like.post_id).subquery()
+        query = query.outerjoin(subquery, models.Post.id == subquery.c.post_id).order_by(desc(func.coalesce(subquery.c.like_count, 0)))
+    elif sort == "comments":
+        subquery = db.query(models.Comment.post_id, func.count(models.Comment.id).label('comment_count')).group_by(models.Comment.post_id).subquery()
+        query = query.outerjoin(subquery, models.Post.id == subquery.c.post_id).order_by(desc(func.coalesce(subquery.c.comment_count, 0)))
+    elif sort == "hot":
+         query = query.outerjoin(models.Like).group_by(models.Post.id).order_by(desc(func.count(models.Like.id)))
+    else:
+        query = query.order_by(desc(models.Post.created_at))
 
-        query = query.filter(models.Post.created_at >= start_date)
+    # PAGINATION APPLIED HERE
+    return query.offset(skip).limit(limit).all()
 
-    # 5. Execute and return (limit to 20 for search performance)
-    results = query.order_by(desc(models.Post.created_at)).limit(20).all()
+@app.get("/comments/search")
+def search_comments(
+    q: str,
+    sort: str = "relevance",
+    skip: int = 0,   # <--- Added
+    limit: int = 10, # <--- Added
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Comment).join(models.Post).options(
+        joinedload(models.Comment.author),
+        joinedload(models.Comment.post)
+    )
 
-    return results
+    if q:
+        query = query.filter(models.Comment.content.ilike(f"%{q}%"))
+
+    if sort == "new":
+        query = query.order_by(desc(models.Comment.timestamp))
+    elif sort == "top":
+        subquery = db.query(models.CommentLike.comment_id, func.sum(models.CommentLike.vote_type).label('score')).group_by(models.CommentLike.comment_id).subquery()
+        query = query.outerjoin(subquery, models.Comment.id == subquery.c.comment_id).order_by(desc(func.coalesce(subquery.c.score, 0)))
+    else:
+        query = query.order_by(desc(models.Comment.timestamp))
+
+    # PAGINATION APPLIED HERE
+    results = query.offset(skip).limit(limit).all()
+
+    # Formatting logic remains the same...
+    data = []
+    for c in results:
+        data.append({
+            "id": c.id,
+            "content": c.content,
+            "timestamp": c.timestamp,
+            "username": c.author.username if c.author else "User",
+            "avatar_url": c.author.avatar_url if c.author else None,
+            "post_id": c.post_id,
+            "post_headline": c.post.headline if c.post else "Unknown Post",
+            "score": 0
+        })
+    return data
 
 # --- SOCIAL ENDPOINTS ---
 
