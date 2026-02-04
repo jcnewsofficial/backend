@@ -48,7 +48,8 @@ app = FastAPI(
     # Hide docs in production by setting the URLs to None
     docs_url=None if ENV == "production" else "/docs",
     redoc_url=None if ENV == "production" else "/redoc",
-    openapi_url=None if ENV == "production" else "/openapi.json"
+    openapi_url=None if ENV == "production" else "/openapi.json",
+    root_path="/api"
 )
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

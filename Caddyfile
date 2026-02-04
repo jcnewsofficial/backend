@@ -1,4 +1,13 @@
 skimsy.app {
-    reverse_proxy backend:8000
-}
+    # 1. Handle all API requests first
+    handle_path /api/* {
+        reverse_proxy backend:8000
+    }
 
+    # 2. Handle everything else (The Web App)
+    handle {
+        root * /var/www/html
+        file_server
+        try_files {path} /index.html
+    }
+}
