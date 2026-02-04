@@ -54,9 +54,17 @@ app = FastAPI(
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
+origins = [
+    "http://localhost:8081",
+    "https://skimsy.app",
+    "https://skimsy.app/",      # Add this
+    "https://www.skimsy.app",
+    "https://www.skimsy.app/",   # Add this
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
