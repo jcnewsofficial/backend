@@ -1,0 +1,4 @@
+skimsy.app {
+    reverse_proxy backend:8000
+}
+

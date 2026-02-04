@@ -41,7 +41,16 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 # --- DB INIT ---
 models.Base.metadata.create_all(bind=database.engine)
 
-app = FastAPI(title="JC News Backend")
+ENV = os.getenv("ENV", "development")
+
+app = FastAPI(
+    title="Skimsy API",
+    # Hide docs in production by setting the URLs to None
+    docs_url=None if ENV == "production" else "/docs",
+    redoc_url=None if ENV == "production" else "/redoc",
+    openapi_url=None if ENV == "production" else "/openapi.json"
+)
+
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 app.add_middleware(
