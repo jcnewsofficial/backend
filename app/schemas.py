@@ -14,11 +14,36 @@ class UserProfile(BaseModel):
     class Config:
         from_attributes = True
 
+class UserPostBase(BaseModel):
+    content: str
+    topic: Optional[str] = None
+    image_url: Optional[str] = None
+
+class UserPostCreate(UserPostBase):
+    pass
+
+class UserPost(UserPostBase):
+    id: int
+    user_id: int
+    created_at: datetime
+    # We reuse the UserProfile schema for the author
+    author: UserProfile
+    like_count: int = 0
+    comment_count: int = 0
+    is_liked: bool = False
+
+    # We reuse existing Comment schema
+    comments: List['Comment'] = []
+
+    class Config:
+        from_attributes = True
+
 class CommentBase(BaseModel):
     content: str
 
 class CommentCreate(CommentBase):
-    post_id: int
+    post_id: Optional[int] = None      # Now Optional
+    user_post_id: Optional[int] = None # New Field
     parent_id: Optional[int] = None
 
 class Comment(CommentBase):
