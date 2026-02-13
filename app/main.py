@@ -1337,8 +1337,7 @@ async def upload_avatar(
 def get_user_posts(
     skip: int = 0,
     limit: int = 20,
-    topic: Optional[str] = None, # Matches "topic" param from old code
-    # Add new params
+    topic: Optional[str] = None,
     category: Optional[str] = None,
     sort: str = "new",
     time: str = "all",
@@ -1351,60 +1350,49 @@ def get_user_posts(
         joinedload(models.UserPost.comments)
     )
 
-    # 1. CATEGORY FILTER
-    # Allow either 'topic' or 'category' param to work
+    # Filters
     filter_topic = category if category else topic
     if filter_topic and filter_topic != "All" and filter_topic != "":
         query = query.filter(models.UserPost.topic == filter_topic)
 
-    # 2. SEARCH FILTER
     if search:
         query = query.filter(models.UserPost.content.ilike(f"%{search}%"))
 
-    # 3. TIME FILTER
     if time != "all":
         now = datetime.utcnow()
         start_date = None
-        if time == "24h":
-            start_date = now - timedelta(hours=24)
-        elif time == "week":
-            start_date = now - timedelta(weeks=1)
-        elif time == "month":
-            start_date = now - timedelta(days=30)
-        elif time == "year":
-            start_date = now - timedelta(days=365)
+        if time == "24h": start_date = now - timedelta(hours=24)
+        elif time == "week": start_date = now - timedelta(weeks=1)
+        elif time == "month": start_date = now - timedelta(days=30)
+        elif time == "year": start_date = now - timedelta(days=365)
+        if start_date: query = query.filter(models.UserPost.created_at >= start_date)
 
-        if start_date:
-            query = query.filter(models.UserPost.created_at >= start_date)
-
-    # 4. SORT FILTER
+    # Sorting
     if sort == "hot" or sort == "top":
-        # Calculate engagement using subquery
-        subquery = db.query(
-            models.UserPostLike.user_post_id,
-            func.count(models.UserPostLike.id).label('count')
-        ).group_by(models.UserPostLike.user_post_id).subquery()
-
-        query = query.outerjoin(subquery, models.UserPost.id == subquery.c.user_post_id)
-        query = query.order_by(desc(func.coalesce(subquery.c.count, 0)))
+        # Sort by total votes (magnitude)
+        subquery = db.query(models.UserPostLike.user_post_id, func.count(models.UserPostLike.id).label('count')).group_by(models.UserPostLike.user_post_id).subquery()
+        query = query.outerjoin(subquery, models.UserPost.id == subquery.c.user_post_id).order_by(desc(func.coalesce(subquery.c.count, 0)))
     else:
-        # Default: Newest
         query = query.order_by(desc(models.UserPost.created_at))
 
     posts = query.offset(skip).limit(limit).all()
 
+    # Populate Vote Counts
     for p in posts:
-        p.like_count = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == p.id).count()
+        # Count Upvotes (1)
+        p.like_count = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == p.id, models.UserPostLike.vote_type == 1).count()
+        # Count Downvotes (-1)
+        p.dislike_count = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == p.id, models.UserPostLike.vote_type == -1).count()
         p.comment_count = len(p.comments)
-        p.is_liked = False
-        if current_user:
-            exists = db.query(models.UserPostLike).filter(
-                models.UserPostLike.user_post_id == p.id,
-                models.UserPostLike.user_id == current_user.id
-            ).first()
-            if exists:
-                p.is_liked = True
 
+        # Determine current user's vote
+        p.user_vote = 0
+        if current_user:
+            vote = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == p.id, models.UserPostLike.user_id == current_user.id).first()
+            if vote:
+                p.user_vote = vote.vote_type
+
+        # Populate comment scores for the UI
         populate_comment_scores(p.comments, db, current_user.id if current_user else None)
 
     return posts
@@ -1440,41 +1428,66 @@ async def create_user_post(
     db.refresh(new_post)
     return new_post
 
-@app.post("/user-posts/{post_id}/like")
-def like_user_post(
+@app.post("/user-posts/{post_id}/vote", response_model=schemas.VoteResponse)
+def vote_user_post(
     post_id: int,
+    vote_type: int, # Query parameter: ?vote_type=1 or ?vote_type=-1
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    existing = db.query(models.UserPostLike).filter(
+    # Check for existing vote
+    existing_vote = db.query(models.UserPostLike).filter(
         models.UserPostLike.user_post_id == post_id,
         models.UserPostLike.user_id == current_user.id
     ).first()
 
-    if existing:
-        db.delete(existing)
-        db.commit()
-        return {"status": "unliked"}
+    final_user_vote = vote_type
+
+    if existing_vote:
+        if existing_vote.vote_type == vote_type:
+            # User clicked the same vote button -> Toggle OFF (remove vote)
+            db.delete(existing_vote)
+            final_user_vote = 0
+        else:
+            # User changed vote (Up -> Down or Down -> Up)
+            existing_vote.vote_type = vote_type
     else:
-        new_like = models.UserPostLike(user_id=current_user.id, user_post_id=post_id)
-        db.add(new_like)
-        db.commit()
-        return {"status": "liked"}
+        # Create new vote
+        new_vote = models.UserPostLike(
+            user_id=current_user.id,
+            user_post_id=post_id,
+            vote_type=vote_type
+        )
+        db.add(new_vote)
+
+    db.commit()
+
+    # Get fresh counts to return to frontend
+    likes = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == post_id, models.UserPostLike.vote_type == 1).count()
+    dislikes = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == post_id, models.UserPostLike.vote_type == -1).count()
+
+    return {
+        "like_count": likes,
+        "dislike_count": dislikes,
+        "user_vote": final_user_vote
+    }
 
 # --- UPDATED: Create Comment (Handle both Post types) ---
 @app.post("/comments", response_model=schemas.Comment)
 async def create_comment(
     content: str = Form(...),
-    post_id: Optional[int] = Form(None),      # Now Optional
-    user_post_id: Optional[int] = Form(None), # New
+    post_id: Optional[int] = Form(None),       # Changed to Optional
+    user_post_id: Optional[int] = Form(None),  # Added this field
     parent_id: Optional[int] = Form(None),
     image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    # 1. Validation: Must have at least one ID
     if not post_id and not user_post_id:
          raise HTTPException(status_code=400, detail="Must provide post_id or user_post_id")
 
+    # 2. Handle Image Upload
     image_path = None
     if image:
         upload_dir = "app/static/comment_images"
@@ -1486,18 +1499,19 @@ async def create_comment(
             shutil.copyfileobj(image.file, buffer)
         image_path = f"/static/comment_images/{filename}"
 
+    # 3. Create Comment
     new_comment = models.Comment(
         content=content,
-        post_id=post_id,         # Can be None
-        user_post_id=user_post_id, # Can be None
+        post_id=post_id,          # Can be None now
+        user_post_id=user_post_id,# Can be None now
         parent_id=parent_id,
         user_id=current_user.id,
         image_url=image_path
     )
     db.add(new_comment)
-    db.flush()
+    db.flush() # Flush to get ID
 
-    # Auto-like own comment
+    # 4. Auto-Upvote own comment
     auto_like = models.CommentLike(
         user_id=current_user.id,
         comment_id=new_comment.id,
@@ -1505,14 +1519,34 @@ async def create_comment(
     )
     db.add(auto_like)
 
-    # --- Notifications Logic (Simplified) ---
-    # (Omitted full implementation for brevity, but logic is same: find owner of post/user_post and notify)
+    # 5. Handle Notifications (Mentions)
+    mentioned_usernames = re.findall(r"@(\w+)", content)
+    unique_mentions = set(mentioned_usernames)
+
+    for username in unique_mentions:
+        target_user = db.query(models.User).filter(
+            models.User.username.ilike(username)
+        ).first()
+
+        if target_user and target_user.id != current_user.id:
+            notification = models.Notification(
+                user_id=target_user.id,
+                sender_id=current_user.id,
+                post_id=post_id,             # Might be None
+                user_post_id=user_post_id,   # Might be None
+                comment_id=new_comment.id,
+                type="mention",
+                timestamp=datetime.utcnow()
+            )
+            db.add(notification)
 
     db.commit()
 
+    # 6. Return Result with formatted Author
     db_comment = db.query(models.Comment).options(joinedload(models.Comment.author)).filter(models.Comment.id == new_comment.id).first()
     db_comment.score = 1
     db_comment.user_vote = 1
+
     return db_comment
 
 @app.get("/user-posts/{post_id}", response_model=schemas.UserPost)
@@ -1529,19 +1563,18 @@ def get_user_post_detail(
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
-    post.like_count = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == post.id).count()
+    # Count Upvotes
+    post.like_count = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == post.id, models.UserPostLike.vote_type == 1).count()
+    # Count Downvotes
+    post.dislike_count = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == post.id, models.UserPostLike.vote_type == -1).count()
     post.comment_count = len(post.comments)
-    post.is_liked = False
 
-    current_user_id = current_user.id if current_user else None
-
+    # Determine User Vote
+    post.user_vote = 0
     if current_user:
-        exists = db.query(models.UserPostLike).filter(
-            models.UserPostLike.user_post_id == post.id,
-            models.UserPostLike.user_id == current_user.id
-        ).first()
-        if exists:
-            post.is_liked = True
+        vote = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == post.id, models.UserPostLike.user_id == current_user.id).first()
+        if vote:
+            post.user_vote = vote.vote_type
 
-    populate_comment_scores(post.comments, db, current_user_id)
+    populate_comment_scores(post.comments, db, current_user.id if current_user else None)
     return post

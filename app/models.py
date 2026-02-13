@@ -57,6 +57,8 @@ class UserPostLike(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     user_post_id = Column(Integer, ForeignKey("user_posts.id"))
 
+    vote_type = Column(Integer, default=1)
+
     user = relationship("User")
     user_post = relationship("UserPost", back_populates="likes")
 
