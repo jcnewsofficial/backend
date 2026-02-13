@@ -1335,27 +1335,65 @@ async def upload_avatar(
 def get_user_posts(
     skip: int = 0,
     limit: int = 20,
-    topic: Optional[str] = None,
+    topic: Optional[str] = None, # Matches "topic" param from old code
+    # Add new params
+    category: Optional[str] = None,
+    sort: str = "new",
+    time: str = "all",
+    search: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
     query = db.query(models.UserPost).options(
         joinedload(models.UserPost.author),
-        joinedload(models.UserPost.comments) # Eager load comments
+        joinedload(models.UserPost.comments)
     )
 
-    if topic:
-        query = query.filter(models.UserPost.topic == topic)
+    # 1. CATEGORY FILTER
+    # Allow either 'topic' or 'category' param to work
+    filter_topic = category if category else topic
+    if filter_topic and filter_topic != "All" and filter_topic != "":
+        query = query.filter(models.UserPost.topic == filter_topic)
 
-    # Order by newest
-    query = query.order_by(desc(models.UserPost.created_at))
+    # 2. SEARCH FILTER
+    if search:
+        query = query.filter(models.UserPost.content.ilike(f"%{search}%"))
+
+    # 3. TIME FILTER
+    if time != "all":
+        now = datetime.utcnow()
+        start_date = None
+        if time == "24h":
+            start_date = now - timedelta(hours=24)
+        elif time == "week":
+            start_date = now - timedelta(weeks=1)
+        elif time == "month":
+            start_date = now - timedelta(days=30)
+        elif time == "year":
+            start_date = now - timedelta(days=365)
+
+        if start_date:
+            query = query.filter(models.UserPost.created_at >= start_date)
+
+    # 4. SORT FILTER
+    if sort == "hot" or sort == "top":
+        # Calculate engagement using subquery
+        subquery = db.query(
+            models.UserPostLike.user_post_id,
+            func.count(models.UserPostLike.id).label('count')
+        ).group_by(models.UserPostLike.user_post_id).subquery()
+
+        query = query.outerjoin(subquery, models.UserPost.id == subquery.c.user_post_id)
+        query = query.order_by(desc(func.coalesce(subquery.c.count, 0)))
+    else:
+        # Default: Newest
+        query = query.order_by(desc(models.UserPost.created_at))
 
     posts = query.offset(skip).limit(limit).all()
 
-    # Populate dynamic fields
     for p in posts:
         p.like_count = db.query(models.UserPostLike).filter(models.UserPostLike.user_post_id == p.id).count()
-        p.comment_count = db.query(models.Comment).filter(models.Comment.user_post_id == p.id).count()
+        p.comment_count = len(p.comments)
         p.is_liked = False
         if current_user:
             exists = db.query(models.UserPostLike).filter(
@@ -1365,11 +1403,11 @@ def get_user_posts(
             if exists:
                 p.is_liked = True
 
-        # Populate comment scores (reusing existing function)
         populate_comment_scores(p.comments, db, current_user.id if current_user else None)
 
     return posts
 
+# --- ENSURE THIS FUNCTION EXISTS (Fixes 404 Error) ---
 @app.post("/user-posts", response_model=schemas.UserPost)
 async def create_user_post(
     content: str = Form(...),
