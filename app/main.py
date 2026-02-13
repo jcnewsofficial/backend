@@ -45,11 +45,13 @@ ENV = os.getenv("ENV", "development")
 
 app = FastAPI(
     title="Skimsy API",
-    # Hide docs in production by setting the URLs to None
+    # Only set root_path if we are in production
+    root_path="/api" if ENV == "production" else "",
+
+    # Hide docs in production (optional, but good practice)
     docs_url=None if ENV == "production" else "/docs",
     redoc_url=None if ENV == "production" else "/redoc",
     openapi_url=None if ENV == "production" else "/openapi.json",
-    root_path="/api"
 )
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
