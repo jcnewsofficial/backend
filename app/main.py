@@ -671,83 +671,10 @@ def search_comments(
 
 # --- SOCIAL ENDPOINTS ---
 
-@app.post("/comments", response_model=schemas.Comment)
-async def create_comment(
-    content: str = Form(...),
-    post_id: int = Form(...),
-    parent_id: Optional[int] = Form(None),
-    image: Optional[UploadFile] = File(None),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    # 1. Handle Image Upload (Keep existing logic)
-    image_path = None
-    if image:
-        upload_dir = "app/static/comment_images"
-        os.makedirs(upload_dir, exist_ok=True)
-        ext = os.path.splitext(image.filename)[1]
-        filename = f"{uuid.uuid4()}{ext}"
-        file_location = os.path.join(upload_dir, filename)
-        with open(file_location, "wb") as buffer:
-            shutil.copyfileobj(image.file, buffer)
-        image_path = f"/static/comment_images/{filename}"
+# DEPRECATED: Old /comments endpoint removed. See updated version at end of file.
 
-    # 2. Create Comment
-    new_comment = models.Comment(
-        content=content,
-        post_id=post_id,
-        parent_id=parent_id,
-        user_id=current_user.id,
-        image_url=image_path
-    )
-    db.add(new_comment)
-    db.flush() # Flush to generate new_comment.id without committing yet
-
-    # --- FIX START: AUTO-UPVOTE ---
-    # Automatically add a "Like" (vote_type=1) for the author
-    auto_like = models.CommentLike(
-        user_id=current_user.id,
-        comment_id=new_comment.id,
-        vote_type=1
-    )
-    db.add(auto_like)
-    # --- FIX END ---
-
-    # 3. DETECT MENTIONS (Keep existing logic)
-    mentioned_usernames = re.findall(r"@(\w+)", content)
-    unique_mentions = set(mentioned_usernames)
-
-    for username in unique_mentions:
-        target_user = db.query(models.User).filter(
-            models.User.username.ilike(username)
-        ).first()
-
-        if target_user and target_user.id != current_user.id:
-            notification = models.Notification(
-                user_id=target_user.id,
-                sender_id=current_user.id,
-                post_id=post_id,
-                comment_id=new_comment.id,
-                type="mention",
-                timestamp=datetime.utcnow()
-            )
-            db.add(notification)
-
-    db.commit()
-
-    # 4. Return the result
-    db_comment = db.query(models.Comment).options(
-        joinedload(models.Comment.author)
-    ).filter(models.Comment.id == new_comment.id).first()
-
-    # Manually set the score/vote fields for the immediate response
-    # Since we just created it and liked it, score is 1 and vote is 1.
-    db_comment.score = 1
-    db_comment.user_vote = 1
-
-    return db_comment
-
-@app.post("/comments/{comment_id}/vote", response_model=schemas.CommentVoteResponse)
+@app.post("/comments/{comment_id}/vote"
+, response_model=schemas.CommentVoteResponse)
 def vote_comment(
     comment_id: int,
     vote_type: int,

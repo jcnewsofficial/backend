@@ -49,7 +49,8 @@ class CommentCreate(CommentBase):
 class Comment(CommentBase):
     id: int
     user_id: Optional[int] = None
-    post_id: int
+    post_id: Optional[int] = None
+    user_post_id: Optional[int] = None
     parent_id: Optional[int] = None
     timestamp: Optional[datetime] = None
 
