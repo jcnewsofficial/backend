@@ -29,6 +29,7 @@ class UserPost(UserPostBase):
     # We reuse the UserProfile schema for the author
     author: UserProfile
     like_count: int = 0
+    dislike_count: int = 0
     comment_count: int = 0
     is_liked: bool = False
 

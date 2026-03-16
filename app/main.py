@@ -1212,6 +1212,120 @@ def get_user_profile(
         "checkin_count": user.checkin_count or 0
     }
 
+@app.get("/users/{user_id}/posts")
+def get_user_profile_posts(
+    user_id: int,
+    sort: str = "new",
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_optional_current_user)
+):
+    posts = db.query(models.UserPost).options(
+        joinedload(models.UserPost.author),
+        joinedload(models.UserPost.comments)
+    ).filter(models.UserPost.user_id == user_id).all()
+
+    for p in posts:
+        p.like_count = db.query(models.UserPostLike).filter(
+            models.UserPostLike.user_post_id == p.id, models.UserPostLike.vote_type == 1
+        ).count()
+        p.dislike_count = db.query(models.UserPostLike).filter(
+            models.UserPostLike.user_post_id == p.id, models.UserPostLike.vote_type == -1
+        ).count()
+        p.comment_count = len(p.comments)
+        p.user_vote = 0
+        if current_user:
+            vote = db.query(models.UserPostLike).filter(
+                models.UserPostLike.user_post_id == p.id,
+                models.UserPostLike.user_id == current_user.id
+            ).first()
+            if vote:
+                p.user_vote = vote.vote_type
+
+    if sort == "hot" or sort == "top":
+        posts.sort(key=lambda p: p.like_count - p.dislike_count, reverse=True)
+    elif sort == "controversial":
+        def controversy_score(p):
+            up, down = p.like_count, p.dislike_count
+            total = up + down
+            if total == 0:
+                return 0
+            return min(up, down) / (total + 1) * total
+        posts.sort(key=controversy_score, reverse=True)
+    else:
+        posts.sort(key=lambda p: p.created_at, reverse=True)
+
+    return posts[:50]
+
+
+@app.get("/users/{user_id}/comments")
+def get_user_profile_comments(
+    user_id: int,
+    db: Session = Depends(get_db)
+):
+    comments = db.query(models.Comment).options(
+        joinedload(models.Comment.post),
+        joinedload(models.Comment.user_post)
+    ).filter(
+        models.Comment.user_id == user_id,
+        models.Comment.content != "[deleted]"
+    ).order_by(desc(models.Comment.timestamp)).limit(50).all()
+
+    result = []
+    for c in comments:
+        score = db.query(func.sum(models.CommentLike.vote_type)).filter(
+            models.CommentLike.comment_id == c.id
+        ).scalar() or 0
+
+        if c.post_id:
+            post_title = c.post.headline if c.post else "Unknown Post"
+            post_type = "news"
+        else:
+            raw = c.user_post.content if c.user_post else "Unknown Post"
+            post_title = (raw[:80] + "...") if len(raw) > 80 else raw
+            post_type = "user_post"
+
+        result.append({
+            "id": c.id,
+            "content": c.content,
+            "timestamp": c.timestamp,
+            "post_id": c.post_id,
+            "user_post_id": c.user_post_id,
+            "post_title": post_title,
+            "post_type": post_type,
+            "score": int(score),
+        })
+    return result
+
+
+@app.get("/users/{user_id}/stats")
+def get_user_profile_stats(
+    user_id: int,
+    db: Session = Depends(get_db)
+):
+    user_post_ids = [row[0] for row in db.query(models.UserPost.id).filter(
+        models.UserPost.user_id == user_id
+    ).all()]
+    post_karma = 0
+    if user_post_ids:
+        post_karma = db.query(func.sum(models.UserPostLike.vote_type)).filter(
+            models.UserPostLike.user_post_id.in_(user_post_ids)
+        ).scalar() or 0
+
+    comment_ids = [row[0] for row in db.query(models.Comment.id).filter(
+        models.Comment.user_id == user_id
+    ).all()]
+    comment_karma = 0
+    if comment_ids:
+        comment_karma = db.query(func.sum(models.CommentLike.vote_type)).filter(
+            models.CommentLike.comment_id.in_(comment_ids)
+        ).scalar() or 0
+
+    return {
+        "post_karma": int(post_karma),
+        "comment_karma": int(comment_karma),
+    }
+
+
 @app.post("/users/me/avatar")
 async def upload_avatar(
     file: UploadFile = File(...),
