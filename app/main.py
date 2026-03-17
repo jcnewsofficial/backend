@@ -28,6 +28,17 @@ import shutil
 import os
 import glob
 import socket
+from PIL import Image as PilImage
+
+MAX_IMAGE_DIMENSION = 1080
+
+def save_image_resized(data: bytes, path: str):
+    """Resize to fit within 1080px on longest side, save as JPEG. Same as Instagram/Reddit."""
+    img = PilImage.open(io.BytesIO(data))
+    img = img.convert("RGB")
+    img.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), PilImage.LANCZOS)
+    img.save(path, "JPEG", quality=85, optimize=True)
+
 
 
 # --- SECURITY CONFIGURATION ---
@@ -919,16 +930,19 @@ def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), 
 @app.get("/messages/conversation/{other_user_id}")
 def get_conversation(
     other_user_id: int,
+    skip: int = 0,
+    limit: int = 30,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    # This query gets the full history between you and the other person
+    # Fetch newest messages first (desc) with pagination, then reverse to ascending for display
     messages = db.query(models.Message).filter(
         ((models.Message.sender_id == current_user.id) & (models.Message.receiver_id == other_user_id)) |
         ((models.Message.sender_id == other_user_id) & (models.Message.receiver_id == current_user.id))
-    ).order_by(models.Message.timestamp.asc()).all()
+    ).order_by(models.Message.timestamp.desc()).offset(skip).limit(limit).all()
 
-    # Format the messages so the frontend can read them easily
+    messages.reverse()
+
     return [
         {
             "id": m.id,
@@ -1346,21 +1360,14 @@ async def upload_avatar(
         except Exception as e:
             print(f"Error deleting old avatar: {e}")
 
-    # 2. Filename Logic (Keep this)
-    extension = os.path.splitext(file.filename)[1].lower()
-    if not extension: extension = ".jpg"
-    unique_filename = f"user_{current_user.id}{extension}"
+    # 2. Always save as .jpg after resize
+    unique_filename = f"user_{current_user.id}.jpg"
     file_location = os.path.join(upload_dir, unique_filename)
 
-    # 3. SAVE THE NEW FILE (Updated Fix)
+    # 3. Read, resize, save
     try:
-        # FIX: Use await file.read() instead of mixing seek/shutil
-        # This ensures the file is fully received before writing
         contents = await file.read()
-
-        with open(file_location, "wb") as buffer:
-            buffer.write(contents)
-
+        save_image_resized(contents, file_location)
     except Exception as e:
         print(f"File Save Error: {e}")
         raise HTTPException(status_code=500, detail="Could not save file to disk")
@@ -1451,11 +1458,9 @@ async def create_user_post(
     if image:
         upload_dir = "app/static/user_uploads"
         os.makedirs(upload_dir, exist_ok=True)
-        ext = os.path.splitext(image.filename)[1]
-        filename = f"{uuid.uuid4()}{ext}"
+        filename = f"{uuid.uuid4()}.jpg"
         file_location = os.path.join(upload_dir, filename)
-        with open(file_location, "wb") as buffer:
-            shutil.copyfileobj(image.file, buffer)
+        save_image_resized(await image.read(), file_location)
         image_path = f"/static/user_uploads/{filename}"
 
     new_post = models.UserPost(
@@ -1533,11 +1538,9 @@ async def create_comment(
     if image:
         upload_dir = "app/static/comment_images"
         os.makedirs(upload_dir, exist_ok=True)
-        ext = os.path.splitext(image.filename)[1]
-        filename = f"{uuid.uuid4()}{ext}"
+        filename = f"{uuid.uuid4()}.jpg"
         file_location = os.path.join(upload_dir, filename)
-        with open(file_location, "wb") as buffer:
-            shutil.copyfileobj(image.file, buffer)
+        save_image_resized(await image.read(), file_location)
         image_path = f"/static/comment_images/{filename}"
 
     # 3. Create Comment
