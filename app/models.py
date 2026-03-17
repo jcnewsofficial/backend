@@ -132,10 +132,25 @@ class Message(Base):
     id = Column(Integer, primary_key=True, index=True)
     sender_id = Column(Integer, ForeignKey("users.id"))
     receiver_id = Column(Integer, ForeignKey("users.id"))
-    content = Column(Text, nullable=False)
+    content = Column(Text, nullable=True)
+    image_url = Column(String, nullable=True)
+    reply_to_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     sender = relationship("User", foreign_keys=[sender_id])
     receiver = relationship("User", foreign_keys=[receiver_id])
+    reply_to = relationship("Message", foreign_keys=[reply_to_id], remote_side="Message.id")
+    reactions = relationship("MessageReaction", back_populates="message", cascade="all, delete-orphan")
+
+class MessageReaction(Base):
+    __tablename__ = "message_reactions"
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"))
+    user_id = Column(Integer, ForeignKey("users.id"))
+    emoji = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    message = relationship("Message", back_populates="reactions")
+    user = relationship("User")
+    __table_args__ = (UniqueConstraint('message_id', 'user_id', name='_msg_user_reaction_uc'),)
 
 class Friendship(Base):
     __tablename__ = "friendships"

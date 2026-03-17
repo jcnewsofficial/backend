@@ -3,7 +3,7 @@ import feedparser
 from fastapi import FastAPI, Depends, HTTPException, Response, status, Header, UploadFile, File, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc, func, or_, case, cast, Float
+from sqlalchemy import desc, func, or_, case, cast, Float, text
 from typing import List, Optional
 from datetime import datetime, timedelta, date
 from jose import JWTError, jwt
@@ -51,6 +51,32 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 
 # --- DB INIT ---
 models.Base.metadata.create_all(bind=database.engine)
+
+# --- RUNTIME MIGRATIONS (idempotent) ---
+def _run_migrations():
+    with database.engine.connect() as conn:
+        for stmt in [
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url VARCHAR",
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER REFERENCES messages(id)",
+            "ALTER TABLE messages ALTER COLUMN content DROP NOT NULL",
+        ]:
+            try:
+                conn.execute(text(stmt))
+            except Exception:
+                pass
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS message_reactions (
+                id SERIAL PRIMARY KEY,
+                message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+                user_id INTEGER REFERENCES users(id),
+                emoji VARCHAR,
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(message_id, user_id)
+            )
+        """))
+        conn.commit()
+
+_run_migrations()
 
 ENV = os.getenv("ENV", "development")
 
@@ -903,22 +929,43 @@ def get_post(
     return post
 
 @app.post("/messages/send")
-def send_message(receiver_id: int, content: str, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    # 1. THE "LOL" CHECK: Prevent self-messaging
+async def send_message(
+    receiver_id: int = Form(...),
+    content: Optional[str] = Form(None),
+    reply_to_id: Optional[int] = Form(None),
+    gif_url: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
     if current_user.id == receiver_id:
-        raise HTTPException(
-            status_code=400,
-            detail="You cannot message yourself."
-        )
+        raise HTTPException(status_code=400, detail="You cannot message yourself.")
 
     receiver = db.query(models.User).filter(models.User.id == receiver_id).first()
     if not receiver:
         raise HTTPException(status_code=404, detail="User not found")
 
+    if not content and not image and not gif_url:
+        raise HTTPException(status_code=400, detail="Message must have content or an image.")
+
+    image_path = None
+    if image:
+        upload_dir = "app/static/message_images"
+        os.makedirs(upload_dir, exist_ok=True)
+        filename = f"msg_{uuid.uuid4().hex}.jpg"
+        file_location = os.path.join(upload_dir, filename)
+        data = await image.read()
+        save_image_resized(data, file_location)
+        image_path = f"/static/message_images/{filename}"
+    elif gif_url:
+        image_path = gif_url
+
     new_msg = models.Message(
         sender_id=current_user.id,
         receiver_id=receiver_id,
         content=content,
+        image_url=image_path,
+        reply_to_id=reply_to_id,
         timestamp=datetime.utcnow()
     )
     db.add(new_msg)
@@ -935,23 +982,67 @@ def get_conversation(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    # Fetch newest messages first (desc) with pagination, then reverse to ascending for display
-    messages = db.query(models.Message).filter(
+    messages = db.query(models.Message).options(
+        joinedload(models.Message.reactions),
+        joinedload(models.Message.reply_to),
+    ).filter(
         ((models.Message.sender_id == current_user.id) & (models.Message.receiver_id == other_user_id)) |
         ((models.Message.sender_id == other_user_id) & (models.Message.receiver_id == current_user.id))
     ).order_by(models.Message.timestamp.desc()).offset(skip).limit(limit).all()
 
     messages.reverse()
 
-    return [
-        {
+    def msg_dict(m):
+        return {
             "id": m.id,
             "content": m.content,
+            "image_url": m.image_url,
             "sender_id": m.sender_id,
             "receiver_id": m.receiver_id,
-            "timestamp": m.timestamp.isoformat()
-        } for m in messages
-    ]
+            "timestamp": m.timestamp.isoformat(),
+            "reply_to": {
+                "id": m.reply_to.id,
+                "content": m.reply_to.content,
+                "image_url": m.reply_to.image_url,
+                "sender_id": m.reply_to.sender_id,
+            } if m.reply_to else None,
+            "reactions": [
+                {"emoji": r.emoji, "user_id": r.user_id}
+                for r in (m.reactions or [])
+            ],
+        }
+
+    return [msg_dict(m) for m in messages]
+
+
+@app.post("/messages/{message_id}/react")
+def react_to_message(
+    message_id: int,
+    emoji: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    msg = db.query(models.Message).filter(models.Message.id == message_id).first()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    existing = db.query(models.MessageReaction).filter_by(
+        message_id=message_id, user_id=current_user.id
+    ).first()
+
+    if existing:
+        if existing.emoji == emoji:
+            db.delete(existing)
+        else:
+            existing.emoji = emoji
+    else:
+        db.add(models.MessageReaction(
+            message_id=message_id,
+            user_id=current_user.id,
+            emoji=emoji,
+        ))
+    db.commit()
+    return {"status": "ok"}
 
 @app.post("/users/checkin")
 def daily_checkin(
