@@ -1253,6 +1253,19 @@ def get_friend_requests(
         for r in requests
     ]
 
+@app.get("/friends/sent-requests")
+def get_sent_requests(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    sent = db.query(models.Friendship).options(
+        joinedload(models.Friendship.receiver)
+    ).filter(
+        models.Friendship.user_id == current_user.id,
+        models.Friendship.status == 'pending'
+    ).all()
+    return [{"user_id": s.friend_id} for s in sent]
+
 @app.get("/friends/list")
 def get_friends_list(
     db: Session = Depends(get_db),
@@ -1278,6 +1291,47 @@ def get_friends_list(
             friends.append({"id": friend_user.id, "username": friend_user.username, "avatar_url": friend_user.avatar_url})
 
     return friends
+
+@app.delete("/friends/{user_id}")
+def unfriend(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    friendship = db.query(models.Friendship).filter(
+        (
+            (models.Friendship.user_id == current_user.id) & (models.Friendship.friend_id == user_id)
+        ) | (
+            (models.Friendship.user_id == user_id) & (models.Friendship.friend_id == current_user.id)
+        ),
+        models.Friendship.status == 'accepted'
+    ).first()
+    if not friendship:
+        raise HTTPException(status_code=404, detail="Friendship not found")
+    db.delete(friendship)
+    db.commit()
+    return {"status": "removed"}
+
+@app.get("/friends/status/{user_id}")
+def get_friend_status(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    friendship = db.query(models.Friendship).filter(
+        (
+            (models.Friendship.user_id == current_user.id) & (models.Friendship.friend_id == user_id)
+        ) | (
+            (models.Friendship.user_id == user_id) & (models.Friendship.friend_id == current_user.id)
+        )
+    ).first()
+    if not friendship:
+        return {"status": "none"}
+    if friendship.status == 'accepted':
+        return {"status": "friends"}
+    if friendship.user_id == current_user.id:
+        return {"status": "sent"}
+    return {"status": "received"}
 
 @app.get("/friends/activity")
 def get_friends_activity(
