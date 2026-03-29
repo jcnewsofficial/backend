@@ -630,14 +630,18 @@ def search_news(
     q: Optional[str] = None,
     sort: str = "relevance",
     time: str = "all",
-    skip: int = 0,   # <--- Added
-    limit: int = 10, # <--- Added (Default 10)
+    category: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 10,
     db: Session = Depends(get_db)
 ):
     query = db.query(models.Post)
 
     if q:
         query = query.filter(models.Post.headline.ilike(f"%{q}%"))
+
+    if category and category.strip() and category.lower() != "all":
+        query = query.filter(models.Post.category.ilike(category))
 
     # Time Filter
     now = datetime.utcnow()
@@ -1048,6 +1052,22 @@ def react_to_message(
         ))
     db.commit()
     return {"status": "ok"}
+
+@app.delete("/messages/conversation/{other_user_id}")
+def delete_conversation(
+    other_user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    db.query(models.Message).filter(
+        (
+            (models.Message.sender_id == current_user.id) & (models.Message.receiver_id == other_user_id)
+        ) | (
+            (models.Message.sender_id == other_user_id) & (models.Message.receiver_id == current_user.id)
+        )
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {"status": "deleted"}
 
 @app.delete("/messages/{message_id}")
 def delete_message(
