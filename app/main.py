@@ -80,6 +80,11 @@ _run_migrations()
 
 ENV = os.getenv("ENV", "development")
 
+# In-memory presence state (no DB migration needed)
+from datetime import datetime as _dt
+_typing_state: dict = {}   # {typer_id: {recipient_id: datetime}}
+_last_seen: dict = {}      # {user_id: datetime}
+
 app = FastAPI(
     title="Skimsy API",
     # Only set root_path if we are in production
@@ -1044,6 +1049,21 @@ def react_to_message(
     db.commit()
     return {"status": "ok"}
 
+@app.delete("/messages/{message_id}")
+def delete_message(
+    message_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    msg = db.query(models.Message).filter(models.Message.id == message_id).first()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if msg.sender_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your message")
+    db.delete(msg)
+    db.commit()
+    return {"status": "deleted"}
+
 @app.post("/users/checkin")
 def daily_checkin(
     db: Session = Depends(get_db),
@@ -1081,6 +1101,30 @@ def get_me(current_user: models.User = Depends(get_current_user)):
         "avatar_version": current_user.avatar_version or 1,
         "checkin_count": current_user.checkin_count or 0 # Key for cache busting
     }
+
+@app.post("/users/heartbeat")
+def heartbeat(current_user: models.User = Depends(get_current_user)):
+    _last_seen[current_user.id] = _dt.utcnow()
+    return {"status": "ok"}
+
+@app.get("/users/{user_id}/online")
+def get_online_status(user_id: int, current_user: models.User = Depends(get_current_user)):
+    last = _last_seen.get(user_id)
+    online = last is not None and (_dt.utcnow() - last).total_seconds() < 120
+    return {"online": online}
+
+@app.post("/messages/typing/{other_user_id}")
+def set_typing(other_user_id: int, current_user: models.User = Depends(get_current_user)):
+    if current_user.id not in _typing_state:
+        _typing_state[current_user.id] = {}
+    _typing_state[current_user.id][other_user_id] = _dt.utcnow()
+    return {"status": "ok"}
+
+@app.get("/messages/typing/{other_user_id}")
+def get_typing(other_user_id: int, current_user: models.User = Depends(get_current_user)):
+    ts = _typing_state.get(other_user_id, {}).get(current_user.id)
+    typing = ts is not None and (_dt.utcnow() - ts).total_seconds() < 4
+    return {"typing": typing}
 
 @app.get("/messages/inbox")
 def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -1296,6 +1340,117 @@ def get_friends_activity(
     # 3. Sort combined list by date
     results.sort(key=lambda x: x['timestamp'], reverse=True)
 
+    return results
+
+@app.get("/users/me/activity")
+def get_my_activity(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    results = []
+
+    # Likes on my UserPosts
+    likes = db.query(models.UserPostLike).options(
+        joinedload(models.UserPostLike.user),
+        joinedload(models.UserPostLike.user_post)
+    ).join(models.UserPost, models.UserPostLike.user_post_id == models.UserPost.id).filter(
+        models.UserPost.user_id == current_user.id,
+        models.UserPostLike.user_id != current_user.id
+    ).order_by(models.UserPostLike.id.desc()).limit(30).all()
+
+    for like in likes:
+        if not like.user or not like.user_post:
+            continue
+        results.append({
+            "type": "like",
+            "actor_username": like.user.username,
+            "actor_avatar": like.user.avatar_url,
+            "actor_avatar_version": like.user.avatar_version or 1,
+            "actor_id": like.user.id,
+            "text": "liked your post",
+            "preview": like.user_post.content[:80] if like.user_post.content else "",
+            "user_post_id": like.user_post_id,
+            "timestamp": like.user_post.created_at.isoformat() if like.user_post.created_at else ""
+        })
+
+    # Comments on my UserPosts
+    comments = db.query(models.Comment).options(
+        joinedload(models.Comment.author),
+        joinedload(models.Comment.user_post)
+    ).join(models.UserPost, models.Comment.user_post_id == models.UserPost.id).filter(
+        models.UserPost.user_id == current_user.id,
+        models.Comment.user_id != current_user.id
+    ).order_by(models.Comment.timestamp.desc()).limit(30).all()
+
+    for comment in comments:
+        if not comment.author or not comment.user_post:
+            continue
+        results.append({
+            "type": "comment",
+            "actor_username": comment.author.username,
+            "actor_avatar": comment.author.avatar_url,
+            "actor_avatar_version": comment.author.avatar_version or 1,
+            "actor_id": comment.author.id,
+            "text": "commented on your post",
+            "preview": comment.content[:80] if comment.content else "",
+            "user_post_id": comment.user_post_id,
+            "timestamp": comment.timestamp.isoformat() if comment.timestamp else ""
+        })
+
+    # Mentions (notifications)
+    mentions = db.query(models.Notification).options(
+        joinedload(models.Notification.sender)
+    ).filter(
+        models.Notification.user_id == current_user.id,
+        models.Notification.type == "mention"
+    ).order_by(models.Notification.timestamp.desc()).limit(20).all()
+
+    for n in mentions:
+        if not n.sender:
+            continue
+        results.append({
+            "type": "mention",
+            "actor_username": n.sender.username,
+            "actor_avatar": n.sender.avatar_url,
+            "actor_avatar_version": n.sender.avatar_version or 1,
+            "actor_id": n.sender.id,
+            "text": "mentioned you in a comment",
+            "preview": "",
+            "user_post_id": n.user_post_id,
+            "timestamp": n.timestamp.isoformat() if n.timestamp else ""
+        })
+
+    results.sort(key=lambda x: x["timestamp"], reverse=True)
+    return results[:50]
+
+@app.get("/messages/search")
+def search_messages(
+    q: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    msgs = db.query(models.Message).options(
+        joinedload(models.Message.sender),
+        joinedload(models.Message.receiver)
+    ).filter(
+        (models.Message.sender_id == current_user.id) | (models.Message.receiver_id == current_user.id),
+        models.Message.content.ilike(f"%{q}%")
+    ).order_by(models.Message.timestamp.desc()).limit(20).all()
+
+    results = []
+    for m in msgs:
+        other = m.receiver if m.sender_id == current_user.id else m.sender
+        if not other:
+            continue
+        results.append({
+            "message_id": m.id,
+            "content": m.content,
+            "timestamp": m.timestamp.isoformat(),
+            "other_user_id": other.id,
+            "other_user_name": other.username,
+            "other_user_avatar": other.avatar_url,
+            "other_user_avatar_version": other.avatar_version or 1,
+        })
     return results
 
 @app.get("/users/{user_id}")
@@ -1542,10 +1697,11 @@ async def create_user_post(
     content: str = Form(...),
     topic: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(None),
+    image_url: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    image_path = None
+    image_path = image_url or None
     if image:
         upload_dir = "app/static/user_uploads"
         os.makedirs(upload_dir, exist_ok=True)
