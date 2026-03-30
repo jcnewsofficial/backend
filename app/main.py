@@ -1264,7 +1264,12 @@ def get_typing(other_user_id: int, current_user: models.User = Depends(get_curre
     return {"typing": typing}
 
 @app.get("/messages/inbox")
-def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def get_inbox(
+    skip: int = 0,
+    limit: int = 30,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
     messages = db.query(models.Message).options(
         joinedload(models.Message.sender),
         joinedload(models.Message.receiver)
@@ -1285,7 +1290,6 @@ def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends
         if not other_user:
             continue
 
-        # Prevent duplicate rows for the same conversation in the inbox list
         if other_user.id in seen_users:
             continue
         seen_users.add(other_user.id)
@@ -1297,19 +1301,17 @@ def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends
             "receiver_id": msg.receiver_id,
             "other_user_id": other_user.id,
             "other_user_name": other_user.username,
-            # CRITICAL: Add both URL and the Version
             "other_user_avatar": other_user.avatar_url,
             "other_user_avatar_version": other_user.avatar_version or 1,
             "timestamp": msg.timestamp.isoformat()
         })
-    return results
+    return results[skip: skip + limit]
 
 @app.get("/users/search")
-def search_users(q: str, db: Session = Depends(get_db)):
-    # Finds users whose names start with or contain the search string
+def search_users(q: str, skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
     users = db.query(models.User).filter(
         models.User.username.ilike(f"%{q}%")
-    ).limit(10).all()
+    ).offset(skip).limit(limit).all()
 
     # ADD avatar_url to the dictionary below:
     return [
