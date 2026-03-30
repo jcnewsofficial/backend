@@ -47,20 +47,20 @@ def auto_parse_news(url):
         image_url = img_tag.get('content') if img_tag else None
 
         # 3. AI Categorization & Summarization
-        # UPDATED PROMPT: Explicitly filters Podcasts/Audio/Video descriptions
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are a strict news filter. Tasks:"
+                        "You are a strict news filter and tagger. Tasks: "
                         "1. Analyze the text. If it is an Advertisement, Shopping Guide, Product Review, "
                         "Podcast, Audio Transcript, Video Description (without full article text), or a generic Landing Page, "
-                        "set 'is_ad': true."
+                        "set 'is_ad': true. "
                         "2. If it is a real text article, classify into ONE: 'World', 'Politics', 'Business', 'Tech', 'Sports', 'Entertainment', 'Science', 'General'. "
-                        "3. Provide 3 short, punchy bullet points (max 15 words each) summarizing the story."
-                        "Return JSON: {'is_ad': bool, 'category': string, 'bullets': [str]}"
+                        "3. Provide 3 short, punchy bullet points (max 15 words each) summarizing the story. "
+                        "4. Extract 6-10 lowercase keyword tags: specific people, places, organizations, technologies, and themes relevant to this story (e.g. 'elon musk', 'ukraine war', 'artificial intelligence', 'federal reserve'). "
+                        "Return JSON: {'is_ad': bool, 'category': string, 'bullets': [str], 'keywords': [str]}"
                     )
                 },
                 {"role": "user", "content": f"Headline: {headline}\n\nText: {full_text[:3000]}"}
@@ -78,11 +78,15 @@ def auto_parse_news(url):
         if category not in valid_categories:
             category = "General"
 
+        raw_keywords = result.get("keywords", [])
+        keywords = [str(k).lower().strip()[:100] for k in raw_keywords if k][:10]
+
         return {
             "headline": headline.strip(),
             "image_url": image_url,
             "category": category,
-            "bullets": result.get("bullets", [])
+            "bullets": result.get("bullets", []),
+            "keywords": keywords,
         }
 
     except Exception as e:
@@ -109,12 +113,13 @@ def auto_parse_news(url):
                     {
                         "role": "system",
                         "content": (
-                            "You are a strict news filter. Tasks:"
+                            "You are a strict news filter and tagger. Tasks: "
                             "1. If the text is an Advertisement, Product Review, Shopping Guide, "
-                            "Podcast, Audio Transcript, or Video Summary, set 'is_ad': true."
+                            "Podcast, Audio Transcript, or Video Summary, set 'is_ad': true. "
                             "2. If real news, classify into: 'World', 'Politics', 'Business', 'Tech', 'Sports', 'Entertainment', 'General'. "
-                            "3. Provide 3 short, punchy bullet points."
-                            "Return JSON: {'is_ad': bool, 'category': string, 'bullets': [str]}"
+                            "3. Provide 3 short, punchy bullet points. "
+                            "4. Extract 6-10 lowercase keyword tags covering people, places, orgs, and themes. "
+                            "Return JSON: {'is_ad': bool, 'category': string, 'bullets': [str], 'keywords': [str]}"
                         )
                     },
                     {"role": "user", "content": f"Headline: {headline}\n\nText: {full_text[:2000]}"}
@@ -132,11 +137,15 @@ def auto_parse_news(url):
             if category not in valid_categories:
                 category = "General"
 
+            raw_keywords = result.get("keywords", [])
+            keywords = [str(k).lower().strip()[:100] for k in raw_keywords if k][:10]
+
             return {
                 "headline": headline.strip(),
                 "image_url": image_url,
                 "category": category,
-                "bullets": result.get("bullets", [])[:3]
+                "bullets": result.get("bullets", [])[:3],
+                "keywords": keywords,
             }
 
         except Exception as inner_e:

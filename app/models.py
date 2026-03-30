@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON, DateTime, UniqueConstraint, Text, Date
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON, DateTime, UniqueConstraint, Text, Date, Float
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -30,6 +30,7 @@ class Post(Base):
     source_name = Column(String, nullable=True)
     url = Column(String)
     views = Column(Integer, default=0)
+    keywords = Column(JSON, default=list)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     comments = relationship("Comment", back_populates="post", cascade="all, delete-orphan")
@@ -161,6 +162,17 @@ class Friendship(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     requester = relationship("User", foreign_keys=[user_id])
     receiver = relationship("User", foreign_keys=[friend_id])
+
+class UserInterest(Base):
+    """Tracks per-user keyword interest scores for personalised feed ranking."""
+    __tablename__ = "user_interests"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    keyword = Column(String(100), nullable=False)
+    score = Column(Float, default=0.0, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    user = relationship("User")
+    __table_args__ = (UniqueConstraint('user_id', 'keyword', name='_user_keyword_uc'),)
 
 class Notification(Base):
     __tablename__ = "notifications"

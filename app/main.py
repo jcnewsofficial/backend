@@ -59,6 +59,7 @@ def _run_migrations():
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url VARCHAR",
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER REFERENCES messages(id)",
             "ALTER TABLE messages ALTER COLUMN content DROP NOT NULL",
+            "ALTER TABLE posts ADD COLUMN IF NOT EXISTS keywords JSONB DEFAULT '[]'",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -72,6 +73,16 @@ def _run_migrations():
                 emoji VARCHAR,
                 created_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(message_id, user_id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_interests (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                keyword VARCHAR(100) NOT NULL,
+                score FLOAT NOT NULL DEFAULT 0.0,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(user_id, keyword)
             )
         """))
         conn.commit()
@@ -315,6 +326,7 @@ async def generic_news_scraper(rss_urls, limit_per_feed=15):
                             image_url=scraped_data.get("image_url"),
                             category=scraped_data["category"],
                             bullet_points=scraped_data["bullets"],
+                            keywords=scraped_data.get("keywords", []),
                             url=link,
                             source_url=link,
                             source_name=source_name,
@@ -414,8 +426,8 @@ async def startup_event():
         asyncio.set_event_loop(loop)
         loop.run_until_complete(generic_news_scraper(feeds, limit_per_feed=15))
 
-    # Start the thread
-    #scraper_thread = threading.Thread(target=run_scraper, daemon=True)
+    # Start the scraper thread
+    scraper_thread = threading.Thread(target=run_scraper, daemon=True)
     #scraper_thread.start()
 
 # --- AUTH ENDPOINTS ---
@@ -624,6 +636,85 @@ def read_posts(
         populate_comment_scores(post.comments, db, current_user_id)
 
     return posts
+
+@app.get("/feed/foryou", response_model=List[schemas.Post])
+def get_for_you_feed(
+    skip: int = 0,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_optional_current_user)
+):
+    """Personalised feed: hot-ranked candidates re-scored by keyword affinity."""
+    CANDIDATES = 200
+
+    # --- Build hot-ranked candidate pool (last 30 days) ---
+    vote_stats = db.query(
+        models.Like.post_id,
+        func.sum(models.Like.vote_type).label('net_score'),
+    ).group_by(models.Like.post_id).subquery()
+
+    base_query = db.query(models.Post).options(
+        joinedload(models.Post.comments).joinedload(models.Comment.author)
+    ).filter(
+        models.Post.created_at >= datetime.utcnow() - timedelta(days=30)
+    ).outerjoin(vote_stats, models.Post.id == vote_stats.c.post_id)
+
+    net_score = func.coalesce(vote_stats.c.net_score, 0)
+    sign = case((net_score < 0, -1), else_=1)
+    seconds = func.extract('epoch', models.Post.created_at) - 1134028003
+    order_magnitude = func.log(10, func.greatest(func.abs(net_score), 1))
+    hot_score_expr = cast(order_magnitude, Float) + (cast(sign, Float) * cast(seconds, Float) / 45000.0)
+
+    candidates = base_query.order_by(desc(hot_score_expr)).limit(CANDIDATES).all()
+
+    # --- Re-rank by keyword affinity if user has interests ---
+    interest_dict: dict = {}
+    if current_user:
+        rows = db.query(models.UserInterest).filter(
+            models.UserInterest.user_id == current_user.id
+        ).order_by(desc(models.UserInterest.score)).limit(40).all()
+        interest_dict = {r.keyword: r.score for r in rows}
+
+    def affinity(post):
+        kws = post.keywords or []
+        if not kws or not interest_dict:
+            return 0.0
+        return sum(interest_dict.get(k.lower(), 0.0) for k in kws) / len(kws)
+
+    scored = [(len(candidates) - i + affinity(p) * 25, p) for i, p in enumerate(candidates)]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    page = [p for _, p in scored][skip: skip + limit]
+
+    current_user_id = current_user.id if current_user else None
+    for post in page:
+        post.like_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == 1).count()
+        post.dislike_count = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.vote_type == -1).count()
+        post.user_vote = 0
+        if current_user_id:
+            uv = db.query(models.Like).filter(models.Like.post_id == post.id, models.Like.user_id == current_user_id).first()
+            if uv:
+                post.user_vote = uv.vote_type
+        populate_comment_scores(post.comments, db, current_user_id)
+    return page
+
+
+@app.post("/feed/engagement")
+def record_engagement(
+    post_id: int,
+    engagement_type: str = "view",
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Called by client when user dwells on a card (view) or opens the article (open)."""
+    post = db.query(models.Post).filter(models.Post.id == post_id).first()
+    if not post or not post.keywords:
+        return {"ok": True}
+    delta = {"view": 1.0, "open": 2.0}.get(engagement_type, 0.0)
+    if delta > 0:
+        update_user_interests(db, current_user.id, post.keywords, delta)
+        db.commit()
+    return {"ok": True}
+
 
 @app.get("/news/search")
 def search_news(
@@ -856,6 +947,14 @@ def vote_post(
         new_vote = models.Like(user_id=current_user.id, post_id=post_id, vote_type=vote_type)
         db.add(new_vote)
 
+    # Update user interests based on vote
+    voted_post = db.query(models.Post).filter(models.Post.id == post_id).first()
+    if voted_post and voted_post.keywords:
+        if final_user_vote == 1:
+            update_user_interests(db, current_user.id, voted_post.keywords, 3.0)
+        elif final_user_vote == -1:
+            update_user_interests(db, current_user.id, voted_post.keywords, -1.0)
+
     db.commit()
 
     # Get fresh counts
@@ -867,6 +966,24 @@ def vote_post(
         "dislike_count": dislikes,
         "user_vote": final_user_vote
     }
+
+def update_user_interests(db, user_id: int, keywords: list, delta: float):
+    """Upsert keyword interest scores for a user. Does NOT commit — caller must commit."""
+    if not keywords or not user_id:
+        return
+    for raw_kw in keywords[:10]:
+        kw = str(raw_kw).lower().strip()[:100]
+        if not kw:
+            continue
+        existing = db.query(models.UserInterest).filter(
+            models.UserInterest.user_id == user_id,
+            models.UserInterest.keyword == kw
+        ).first()
+        if existing:
+            existing.score = max(0.0, min(100.0, existing.score + delta))
+            existing.updated_at = datetime.utcnow()
+        elif delta > 0:
+            db.add(models.UserInterest(user_id=user_id, keyword=kw, score=delta))
 
 def populate_comment_scores(comments, db, current_user_id=None):
     for comment in comments:
@@ -1919,6 +2036,12 @@ async def create_comment(
                 timestamp=datetime.utcnow()
             )
             db.add(notification)
+
+    # Boost interests when commenting on a news post (strong intent signal)
+    if post_id:
+        news_post = db.query(models.Post).filter(models.Post.id == post_id).first()
+        if news_post and news_post.keywords:
+            update_user_interests(db, current_user.id, news_post.keywords, 5.0)
 
     db.commit()
 
