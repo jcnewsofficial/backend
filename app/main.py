@@ -1765,6 +1765,21 @@ def get_user_posts(
 
     return posts
 
+@app.delete("/user-posts/{post_id}")
+def delete_user_post(
+    post_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    post = db.query(models.UserPost).filter(models.UserPost.id == post_id).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your post")
+    db.delete(post)
+    db.commit()
+    return {"status": "deleted"}
+
 # --- ENSURE THIS FUNCTION EXISTS (Fixes 404 Error) ---
 @app.post("/user-posts", response_model=schemas.UserPost)
 async def create_user_post(
