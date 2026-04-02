@@ -4,6 +4,7 @@ from fastapi import FastAPI, Depends, HTTPException, Response, status, Header, U
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, func, or_, case, cast, Float, text
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from datetime import datetime, timedelta, date
 from jose import JWTError, jwt
@@ -434,9 +435,10 @@ async def startup_event():
 
 @app.post("/register", response_model=schemas.User)
 def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    if db.query(models.User).filter(models.User.email == user.email).first():
+        raise HTTPException(status_code=400, detail="That email is already registered. Try logging in instead.")
+    if db.query(models.User).filter(models.User.username == user.username).first():
+        raise HTTPException(status_code=400, detail="That username is already taken. Please choose a different one.")
 
     new_user = models.User(
         email=user.email,
@@ -444,7 +446,16 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
         hashed_password=get_password_hash(user.password)
     )
     db.add(new_user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        err = str(e.orig).lower()
+        if "username" in err:
+            raise HTTPException(status_code=400, detail="That username is already taken. Please choose a different one.")
+        if "email" in err:
+            raise HTTPException(status_code=400, detail="That email is already registered. Try logging in instead.")
+        raise HTTPException(status_code=400, detail="Account could not be created. Please try again.")
     db.refresh(new_user)
     return new_user
 
