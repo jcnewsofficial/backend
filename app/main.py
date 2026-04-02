@@ -349,8 +349,8 @@ async def generic_news_scraper(rss_urls, limit_per_feed=15):
         finally:
             db.close()
 
-        print("--- Cycle Complete. Sleeping 30m ---")
-        await asyncio.sleep(1800)
+        print("--- Cycle Complete. Sleeping 5m ---")
+        await asyncio.sleep(300)
 
 @app.on_event("startup")
 async def startup_event():
