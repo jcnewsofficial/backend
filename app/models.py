@@ -153,6 +153,49 @@ class MessageReaction(Base):
     user = relationship("User")
     __table_args__ = (UniqueConstraint('message_id', 'user_id', name='_msg_user_reaction_uc'),)
 
+class GroupChat(Base):
+    __tablename__ = "group_chats"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    members = relationship("GroupMember", back_populates="group", cascade="all, delete-orphan")
+    messages = relationship("GroupMessage", back_populates="group", cascade="all, delete-orphan")
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("group_chats.id", ondelete="CASCADE"))
+    user_id = Column(Integer, ForeignKey("users.id"))
+    joined_at = Column(DateTime, default=datetime.utcnow)
+    group = relationship("GroupChat", back_populates="members")
+    user = relationship("User")
+    __table_args__ = (UniqueConstraint('group_id', 'user_id', name='_group_member_uc'),)
+
+class GroupMessage(Base):
+    __tablename__ = "group_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("group_chats.id", ondelete="CASCADE"))
+    sender_id = Column(Integer, ForeignKey("users.id"))
+    content = Column(Text, nullable=True)
+    image_url = Column(String, nullable=True)
+    reply_to_id = Column(Integer, ForeignKey("group_messages.id"), nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    group = relationship("GroupChat", back_populates="messages")
+    sender = relationship("User", foreign_keys=[sender_id])
+    reply_to = relationship("GroupMessage", foreign_keys=[reply_to_id], remote_side="GroupMessage.id")
+    reactions = relationship("GroupMessageReaction", back_populates="message", cascade="all, delete-orphan")
+
+class GroupMessageReaction(Base):
+    __tablename__ = "group_message_reactions"
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("group_messages.id", ondelete="CASCADE"))
+    user_id = Column(Integer, ForeignKey("users.id"))
+    emoji = Column(String)
+    message = relationship("GroupMessage", back_populates="reactions")
+    user = relationship("User")
+    __table_args__ = (UniqueConstraint('message_id', 'user_id', name='_group_msg_user_reaction_uc'),)
+
 class Friendship(Base):
     __tablename__ = "friendships"
     id = Column(Integer, primary_key=True, index=True)

@@ -1278,6 +1278,218 @@ def get_typing(other_user_id: int, current_user: models.User = Depends(get_curre
     typing = ts is not None and (_dt.utcnow() - ts).total_seconds() < 4
     return {"typing": typing}
 
+@app.post("/groups/create")
+def create_group(
+    name: str = Form(...),
+    member_ids: str = Form(...),  # comma-separated user IDs
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    ids = [int(i.strip()) for i in member_ids.split(',') if i.strip()]
+    if current_user.id not in ids:
+        ids.append(current_user.id)
+    if len(ids) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 members")
+
+    group = models.GroupChat(name=name.strip(), created_by=current_user.id)
+    db.add(group)
+    db.flush()
+    for uid in ids:
+        db.add(models.GroupMember(group_id=group.id, user_id=uid))
+    db.commit()
+    db.refresh(group)
+    return {"id": group.id, "name": group.name}
+
+
+@app.get("/groups/")
+def list_groups(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    memberships = db.query(models.GroupMember).filter(
+        models.GroupMember.user_id == current_user.id
+    ).all()
+    result = []
+    for m in memberships:
+        group = db.query(models.GroupChat).filter(models.GroupChat.id == m.group_id).first()
+        if not group:
+            continue
+        last_msg = db.query(models.GroupMessage).filter(
+            models.GroupMessage.group_id == group.id
+        ).order_by(models.GroupMessage.timestamp.desc()).first()
+        members = db.query(models.GroupMember).filter(
+            models.GroupMember.group_id == group.id
+        ).all()
+        member_names = []
+        for gm in members:
+            u = db.query(models.User).filter(models.User.id == gm.user_id).first()
+            if u:
+                member_names.append(u.username)
+        result.append({
+            "id": group.id,
+            "name": group.name,
+            "member_count": len(members),
+            "member_names": member_names,
+            "last_message": last_msg.content if last_msg else None,
+            "last_timestamp": last_msg.timestamp.isoformat() if last_msg else group.created_at.isoformat(),
+        })
+    result.sort(key=lambda x: x["last_timestamp"], reverse=True)
+    return result
+
+
+@app.get("/groups/{group_id}/messages")
+def get_group_messages(
+    group_id: int,
+    skip: int = 0,
+    limit: int = 30,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    member = db.query(models.GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not a member of this group")
+    messages = db.query(models.GroupMessage).options(
+        joinedload(models.GroupMessage.sender),
+        joinedload(models.GroupMessage.reactions),
+        joinedload(models.GroupMessage.reply_to),
+    ).filter(models.GroupMessage.group_id == group_id).order_by(
+        models.GroupMessage.timestamp.desc()
+    ).offset(skip).limit(limit).all()
+    messages.reverse()
+
+    def msg_dict(m):
+        return {
+            "id": m.id,
+            "content": m.content,
+            "image_url": m.image_url,
+            "sender_id": m.sender_id,
+            "sender_username": m.sender.username if m.sender else "Unknown",
+            "sender_avatar": m.sender.avatar_url if m.sender else None,
+            "sender_avatar_version": m.sender.avatar_version or 1 if m.sender else 1,
+            "timestamp": m.timestamp.isoformat(),
+            "reply_to": {
+                "id": m.reply_to.id,
+                "content": m.reply_to.content,
+                "image_url": m.reply_to.image_url,
+                "sender_id": m.reply_to.sender_id,
+            } if m.reply_to else None,
+            "reactions": [{"emoji": r.emoji, "user_id": r.user_id} for r in (m.reactions or [])],
+        }
+    return [msg_dict(m) for m in messages]
+
+
+@app.post("/groups/{group_id}/messages/send")
+async def send_group_message(
+    group_id: int,
+    content: Optional[str] = Form(None),
+    reply_to_id: Optional[int] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    member = db.query(models.GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not a member of this group")
+    if not content and not image:
+        raise HTTPException(status_code=400, detail="Message must have content or an image.")
+
+    image_path = None
+    if image:
+        upload_dir = "app/static/message_images"
+        os.makedirs(upload_dir, exist_ok=True)
+        filename = f"grpmsg_{uuid.uuid4().hex}.jpg"
+        file_location = os.path.join(upload_dir, filename)
+        data = await image.read()
+        save_image_resized(data, file_location)
+        image_path = f"/static/message_images/{filename}"
+
+    msg = models.GroupMessage(
+        group_id=group_id,
+        sender_id=current_user.id,
+        content=content,
+        image_url=image_path,
+        reply_to_id=reply_to_id,
+        timestamp=datetime.utcnow(),
+    )
+    db.add(msg)
+    db.commit()
+    return {"status": "sent"}
+
+
+@app.post("/groups/{group_id}/messages/{message_id}/react")
+def react_group_message(
+    group_id: int,
+    message_id: int,
+    emoji: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    member = db.query(models.GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not a member")
+    existing = db.query(models.GroupMessageReaction).filter_by(
+        message_id=message_id, user_id=current_user.id
+    ).first()
+    if existing:
+        if existing.emoji == emoji:
+            db.delete(existing)
+        else:
+            existing.emoji = emoji
+    else:
+        db.add(models.GroupMessageReaction(message_id=message_id, user_id=current_user.id, emoji=emoji))
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.delete("/groups/{group_id}/messages/{message_id}")
+def delete_group_message(
+    group_id: int,
+    message_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    msg = db.query(models.GroupMessage).filter_by(id=message_id, group_id=group_id).first()
+    if not msg:
+        raise HTTPException(status_code=404)
+    if msg.sender_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Can only delete your own messages")
+    db.delete(msg)
+    db.commit()
+    return {"status": "deleted"}
+
+
+@app.post("/groups/{group_id}/leave")
+def leave_group(
+    group_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    member = db.query(models.GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
+    if member:
+        db.delete(member)
+        db.commit()
+    return {"status": "left"}
+
+
+@app.get("/groups/{group_id}/info")
+def get_group_info(
+    group_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    member = db.query(models.GroupMember).filter_by(group_id=group_id, user_id=current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not a member")
+    group = db.query(models.GroupChat).filter_by(id=group_id).first()
+    members = db.query(models.GroupMember).filter_by(group_id=group_id).all()
+    member_list = []
+    for gm in members:
+        u = db.query(models.User).filter_by(id=gm.user_id).first()
+        if u:
+            member_list.append({"id": u.id, "username": u.username, "avatar_url": u.avatar_url, "avatar_version": u.avatar_version or 1})
+    return {"id": group.id, "name": group.name, "created_by": group.created_by, "members": member_list}
+
+
 @app.get("/messages/inbox")
 def get_inbox(
     skip: int = 0,
