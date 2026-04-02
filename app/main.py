@@ -429,7 +429,7 @@ async def startup_event():
 
     # Start the scraper thread
     scraper_thread = threading.Thread(target=run_scraper, daemon=True)
-    #scraper_thread.start()
+    scraper_thread.start()
 
 # --- AUTH ENDPOINTS ---
 
