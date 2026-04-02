@@ -652,6 +652,7 @@ def read_posts(
 def get_for_you_feed(
     skip: int = 0,
     limit: int = 10,
+    category: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
@@ -669,6 +670,9 @@ def get_for_you_feed(
     ).filter(
         models.Post.created_at >= datetime.utcnow() - timedelta(days=30)
     ).outerjoin(vote_stats, models.Post.id == vote_stats.c.post_id)
+
+    if category and category.strip() and category.lower() != "all":
+        base_query = base_query.filter(models.Post.category.ilike(category))
 
     net_score = func.coalesce(vote_stats.c.net_score, 0)
     sign = case((net_score < 0, -1), else_=1)
