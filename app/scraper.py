@@ -48,7 +48,7 @@ def auto_parse_news(url):
 
         # 3. AI Categorization & Summarization
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-nano",
             messages=[
                 {
                     "role": "system",
@@ -108,7 +108,7 @@ def auto_parse_news(url):
             full_text = " ".join([p.get_text() for p in all_paragraphs[:8]])
 
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4.1-nano",
                 messages=[
                     {
                         "role": "system",
