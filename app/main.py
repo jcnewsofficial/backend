@@ -653,6 +653,7 @@ def get_for_you_feed(
     skip: int = 0,
     limit: int = 10,
     category: Optional[str] = None,
+    exclude_ids: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
@@ -695,6 +696,10 @@ def get_for_you_feed(
         if not kws or not interest_dict:
             return 0.0
         return sum(interest_dict.get(k.lower(), 0.0) for k in kws) / len(kws)
+
+    excluded = set(int(x) for x in exclude_ids.split(',') if x.strip().isdigit()) if exclude_ids else set()
+    if excluded:
+        candidates = [p for p in candidates if p.id not in excluded]
 
     scored = [(len(candidates) - i + affinity(p) * 25, p) for i, p in enumerate(candidates)]
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -2000,10 +2005,31 @@ def get_user_profile_stats(
             models.CommentLike.comment_id.in_(comment_ids)
         ).scalar() or 0
 
+    follower_count = db.query(models.Friendship).filter(
+        models.Friendship.status == 'accepted',
+        (models.Friendship.user_id == user_id) | (models.Friendship.friend_id == user_id)
+    ).count()
+
     return {
         "post_karma": int(post_karma),
         "comment_karma": int(comment_karma),
+        "follower_count": follower_count,
     }
+
+
+@app.get("/users/{user_id}/followers")
+def get_user_followers(user_id: int, db: Session = Depends(get_db)):
+    friendships = db.query(models.Friendship).filter(
+        models.Friendship.status == 'accepted',
+        (models.Friendship.user_id == user_id) | (models.Friendship.friend_id == user_id)
+    ).all()
+    result = []
+    for f in friendships:
+        other_id = f.friend_id if f.user_id == user_id else f.user_id
+        u = db.query(models.User).filter(models.User.id == other_id).first()
+        if u:
+            result.append({"id": u.id, "username": u.username, "avatar_url": u.avatar_url, "avatar_version": u.avatar_version or 1})
+    return result
 
 
 @app.post("/users/me/avatar")
