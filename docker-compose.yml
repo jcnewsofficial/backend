@@ -24,6 +24,7 @@ services:
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@db/${DB_NAME}
       - SECRET_KEY=${SECRET_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ENV=production
     depends_on:
       - db
     restart: always
