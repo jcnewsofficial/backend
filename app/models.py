@@ -44,6 +44,9 @@ class UserPost(Base):
     content = Column(Text, nullable=False)
     image_url = Column(String, nullable=True)
     topic = Column(String, nullable=True) # e.g. "Tech", "Life", "Rant"
+    link_url = Column(String, nullable=True)
+    link_title = Column(String, nullable=True)
+    link_image = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

@@ -57,6 +57,9 @@ models.Base.metadata.create_all(bind=database.engine)
 def _run_migrations():
     with database.engine.connect() as conn:
         for stmt in [
+            "ALTER TABLE user_posts ADD COLUMN IF NOT EXISTS link_url VARCHAR",
+            "ALTER TABLE user_posts ADD COLUMN IF NOT EXISTS link_title VARCHAR",
+            "ALTER TABLE user_posts ADD COLUMN IF NOT EXISTS link_image VARCHAR",
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url VARCHAR",
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER REFERENCES messages(id)",
             "ALTER TABLE messages ALTER COLUMN content DROP NOT NULL",
@@ -2152,6 +2155,71 @@ def delete_user_post(
     db.commit()
     return {"status": "deleted"}
 
+NSFW_DOMAINS = {
+    'pornhub.com', 'xvideos.com', 'xhamster.com', 'redtube.com', 'xnxx.com',
+    'youporn.com', 'tube8.com', 'spankbang.com', 'beeg.com', 'drtuber.com',
+    'tnaflix.com', 'onlyfans.com', 'fansly.com', 'chaturbate.com', 'livejasmin.com',
+    'cam4.com', 'stripchat.com', 'bongacams.com', 'myfreecams.com', 'camsoda.com',
+    'brazzers.com', 'bangbros.com', 'realitykings.com', 'mofos.com', 'naughtyamerica.com',
+    'adultfriendfinder.com', 'ashleymadison.com',
+}
+
+@app.get("/link-preview")
+def get_link_preview(url: str):
+    # Validate URL format
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            raise HTTPException(status_code=400, detail="Invalid URL")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid URL")
+
+    # Check NSFW domains
+    domain = parsed.netloc.lower().lstrip('www.')
+    if any(domain == d or domain.endswith('.' + d) for d in NSFW_DOMAINS):
+        raise HTTPException(status_code=400, detail="This link is not allowed")
+
+    try:
+        resp = requests.get(
+            url,
+            timeout=5,
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; SkimsyBot/1.0)'},
+            allow_redirects=True
+        )
+        resp.raise_for_status()
+        content_type = resp.headers.get('content-type', '')
+        if 'text/html' not in content_type:
+            raise HTTPException(status_code=400, detail="URL does not point to a webpage")
+    except requests.RequestException:
+        raise HTTPException(status_code=400, detail="Could not fetch URL")
+
+    soup = BeautifulSoup(resp.text, 'html.parser')
+
+    # Title: og:title → twitter:title → <title>
+    title = None
+    for attr in [('property', 'og:title'), ('name', 'twitter:title')]:
+        tag = soup.find('meta', {attr[0]: attr[1]})
+        if tag and tag.get('content'):
+            title = tag['content'].strip()
+            break
+    if not title:
+        title_tag = soup.find('title')
+        if title_tag:
+            title = title_tag.get_text().strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Could not find article title")
+
+    # Image: og:image → twitter:image
+    image = None
+    for attr in [('property', 'og:image'), ('name', 'twitter:image')]:
+        tag = soup.find('meta', {attr[0]: attr[1]})
+        if tag and tag.get('content'):
+            image = tag['content'].strip()
+            break
+
+    return {"title": title[:200], "image": image, "url": url}
+
+
 # --- ENSURE THIS FUNCTION EXISTS (Fixes 404 Error) ---
 @app.post("/user-posts", response_model=schemas.UserPost)
 async def create_user_post(
@@ -2159,6 +2227,9 @@ async def create_user_post(
     topic: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(None),
     image_url: Optional[str] = Form(None),
+    link_url: Optional[str] = Form(None),
+    link_title: Optional[str] = Form(None),
+    link_image: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -2175,7 +2246,10 @@ async def create_user_post(
         user_id=current_user.id,
         content=content,
         topic=topic,
-        image_url=image_path
+        image_url=image_path,
+        link_url=link_url or None,
+        link_title=link_title or None,
+        link_image=link_image or None,
     )
     db.add(new_post)
     db.commit()

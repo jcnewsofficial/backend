@@ -18,6 +18,9 @@ class UserPostBase(BaseModel):
     content: str
     topic: Optional[str] = None
     image_url: Optional[str] = None
+    link_url: Optional[str] = None
+    link_title: Optional[str] = None
+    link_image: Optional[str] = None
 
 class UserPostCreate(UserPostBase):
     pass
