@@ -1882,7 +1882,7 @@ def search_messages(
 def get_user_profile(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: Optional[models.User] = Depends(get_optional_current_user)
 ):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
