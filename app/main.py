@@ -146,13 +146,20 @@ def _og_html(title: str, description: str, image_url: str | None, page_url: str)
 <body></body>
 </html>"""
 
+def _spa_html() -> str:
+    try:
+        with open("/code/dist/index.html") as f:
+            return f.read()
+    except FileNotFoundError:
+        return '<html><body><script>window.location="/"</script></body></html>'
+
 @app.get("/news/{news_id}", response_class=HTMLResponse)
 def og_news(news_id: int, request: Request, db: Session = Depends(get_db)):
-    if not _is_bot(request.headers.get("user-agent", "")):
-        return HTMLResponse(status_code=302, headers={"Location": "/"})
     post = db.query(models.Post).filter(models.Post.id == news_id).first()
     if not post:
         raise HTTPException(status_code=404)
+    if not _is_bot(request.headers.get("user-agent", "")):
+        return HTMLResponse(_spa_html())
     return HTMLResponse(_og_html(
         title=post.headline,
         description=getattr(post, 'summary', None) or post.source_name or '',
@@ -162,11 +169,11 @@ def og_news(news_id: int, request: Request, db: Session = Depends(get_db)):
 
 @app.get("/post/{post_id}", response_class=HTMLResponse)
 def og_post(post_id: int, request: Request, db: Session = Depends(get_db)):
-    if not _is_bot(request.headers.get("user-agent", "")):
-        return HTMLResponse(status_code=302, headers={"Location": "/"})
     post = db.query(models.UserPost).filter(models.UserPost.id == post_id).first()
     if not post:
         raise HTTPException(status_code=404)
+    if not _is_bot(request.headers.get("user-agent", "")):
+        return HTMLResponse(_spa_html())
     author = post.author.username if post.author else 'Someone'
     return HTMLResponse(_og_html(
         title=f"{author} on Skimsy",

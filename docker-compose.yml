@@ -18,6 +18,8 @@ services:
     volumes:
       # Map static files so uploads persist outside the container
       - ./app/static:/code/app/static
+      # Read-only mount of the web SPA so FastAPI can serve index.html for browsers
+      - ./dist:/code/dist:ro
     ports:
       - "8000:8000"
     environment:

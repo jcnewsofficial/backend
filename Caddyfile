@@ -1,21 +1,18 @@
 skimsy.app {
-    # 1. API
-    handle_path /api/* {
+    route /api/* {
+        uri strip_prefix /api
         reverse_proxy backend:8000
     }
 
-    # 2. OG preview: only proxy /news/* and /post/* to FastAPI when the
-    #    requester is a link-preview bot. Regular browsers still get the SPA.
-    @og_bot {
-        path /news/* /post/*
-        header_regexp User-Agent (?i)(facebookexternalhit|twitterbot|linkedinbot|whatsapp|slack|kakao|telegram|discordbot|googlebot|bingbot|applebot|crawler|spider|preview|bot)
-    }
-    handle @og_bot {
+    route /news/* {
         reverse_proxy backend:8000
     }
 
-    # 3. Everything else → SPA
-    handle {
+    route /post/* {
+        reverse_proxy backend:8000
+    }
+
+    route {
         root * /var/www/html
         file_server
         try_files {path} /index.html
