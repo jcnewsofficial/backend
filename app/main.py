@@ -1,6 +1,7 @@
 import asyncio
 import feedparser
-from fastapi import FastAPI, Depends, HTTPException, Response, status, Header, UploadFile, File, Body
+from fastapi import FastAPI, Depends, HTTPException, Response, status, Header, UploadFile, File, Body, Request
+from fastapi.responses import HTMLResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, func, or_, case, cast, Float, text
@@ -112,6 +113,67 @@ app = FastAPI(
 )
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+# ---------- OG PREVIEW HELPERS ----------
+_BOT_UA = re.compile(
+    r'(facebookexternalhit|twitterbot|linkedinbot|whatsapp|slack|kakao'
+    r'|telegram|discordbot|googlebot|bingbot|applebot|crawler|spider|preview|bot)',
+    re.IGNORECASE,
+)
+
+def _is_bot(ua: str) -> bool:
+    return bool(_BOT_UA.search(ua))
+
+def _og_html(title: str, description: str, image_url: str | None, page_url: str) -> str:
+    t = (title or 'Skimsy').replace('"', '&quot;')[:120]
+    d = (description or '').replace('"', '&quot;')[:200]
+    img = f'<meta property="og:image" content="{image_url}">\n    <meta name="twitter:image" content="{image_url}">' if image_url else ''
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{t} — Skimsy</title>
+<meta property="og:site_name" content="Skimsy">
+<meta property="og:type" content="article">
+<meta property="og:title" content="{t}">
+<meta property="og:description" content="{d}">
+<meta property="og:url" content="{page_url}">
+{img}
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{t}">
+<meta name="twitter:description" content="{d}">
+</head>
+<body></body>
+</html>"""
+
+@app.get("/news/{news_id}", response_class=HTMLResponse)
+def og_news(news_id: int, request: Request, db: Session = Depends(get_db)):
+    if not _is_bot(request.headers.get("user-agent", "")):
+        return HTMLResponse(status_code=302, headers={"Location": "/"})
+    post = db.query(models.Post).filter(models.Post.id == news_id).first()
+    if not post:
+        raise HTTPException(status_code=404)
+    return HTMLResponse(_og_html(
+        title=post.headline,
+        description=getattr(post, 'summary', None) or post.source_name or '',
+        image_url=post.image_url,
+        page_url=str(request.url),
+    ))
+
+@app.get("/post/{post_id}", response_class=HTMLResponse)
+def og_post(post_id: int, request: Request, db: Session = Depends(get_db)):
+    if not _is_bot(request.headers.get("user-agent", "")):
+        return HTMLResponse(status_code=302, headers={"Location": "/"})
+    post = db.query(models.UserPost).filter(models.UserPost.id == post_id).first()
+    if not post:
+        raise HTTPException(status_code=404)
+    author = post.author.username if post.author else 'Someone'
+    return HTMLResponse(_og_html(
+        title=f"{author} on Skimsy",
+        description=post.content or '',
+        image_url=post.image_url,
+        page_url=str(request.url),
+    ))
 
 origins = [
     "http://localhost:8081",
