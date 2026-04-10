@@ -175,10 +175,14 @@ def og_post(post_id: int, request: Request, db: Session = Depends(get_db)):
     if not _is_bot(request.headers.get("user-agent", "")):
         return HTMLResponse(_spa_html())
     author = post.author.username if post.author else 'Someone'
+    # Prefer link preview data when the post is a news share
+    title = post.link_title or f"{author} on Skimsy"
+    description = post.content or ''
+    image_url = post.link_image or post.image_url
     return HTMLResponse(_og_html(
-        title=f"{author} on Skimsy",
-        description=post.content or '',
-        image_url=post.image_url,
+        title=title,
+        description=description,
+        image_url=image_url,
         page_url=str(request.url),
     ))
 
