@@ -116,7 +116,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 # ---------- OG PREVIEW HELPERS ----------
 _BOT_UA = re.compile(
-    r'(facebookexternalhit|twitterbot|linkedinbot|whatsapp|slack|kakao'
+    r'(facebookexternalhit|twitterbot|linkedinbot|whatsapp|slack|kakaotalk-scrap'
     r'|telegram|discordbot|googlebot|bingbot|applebot|crawler|spider|preview|bot)',
     re.IGNORECASE,
 )
@@ -175,10 +175,11 @@ def og_post(post_id: int, request: Request, db: Session = Depends(get_db)):
     if not _is_bot(request.headers.get("user-agent", "")):
         return HTMLResponse(_spa_html())
     author = post.author.username if post.author else 'Someone'
+    # Prefer link preview data when the post is a news share
     title = post.link_title or f"{author} on Skimsy"
     description = post.content or ''
     image_url = post.link_image or post.image_url
-    # Always use https — Caddy terminates SSL so request.url would be http://
+    # Always use https — Caddy terminates SSL so request.url returns http://
     page_url = f"https://skimsy.app/post/{post_id}"
     return HTMLResponse(_og_html(
         title=title,
