@@ -499,6 +499,10 @@ async def startup_event():
         "https://decrypt.co/feed"                               # Decrypt
     ]
 
+    if ENV != "production":
+        print("--- News scraper disabled (not production) ---")
+        return
+
     # Define a helper to run the async function in a new thread's loop
     def run_scraper():
         loop = asyncio.new_event_loop()
