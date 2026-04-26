@@ -23,6 +23,7 @@ from time import mktime
 import threading
 import io
 import re
+import random
 from fastapi import File, UploadFile, Form # Add these
 import uuid # Add this
 
@@ -65,6 +66,9 @@ def _run_migrations():
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER REFERENCES messages(id)",
             "ALTER TABLE messages ALTER COLUMN content DROP NOT NULL",
             "ALTER TABLE posts ADD COLUMN IF NOT EXISTS keywords JSONB DEFAULT '[]'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR",
+            "ALTER TABLE users ALTER COLUMN hashed_password DROP NOT NULL",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -90,6 +94,8 @@ def _run_migrations():
                 UNIQUE(user_id, keyword)
             )
         """))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_id ON users(google_id) WHERE google_id IS NOT NULL"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_phone ON users(phone) WHERE phone IS NOT NULL"))
         conn.commit()
 
 _run_migrations()
@@ -100,6 +106,12 @@ ENV = os.getenv("ENV", "development")
 from datetime import datetime as _dt
 _typing_state: dict = {}   # {typer_id: {recipient_id: datetime}}
 _last_seen: dict = {}      # {user_id: datetime}
+
+# Phone OTP store: {phone: {'otp': str, 'expires': datetime}}
+_otp_store: dict = {}
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM = os.getenv("TWILIO_PHONE_NUMBER")
 
 app = FastAPI(
     title="Skimsy API",
@@ -544,12 +556,117 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    if not user or not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     # Store email in 'sub' to match get_current_user logic
     access_token = create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/auth/google")
+def google_auth(payload: dict = Body(...), db: Session = Depends(get_db)):
+    access_token = payload.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Access token required")
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/userinfo/v2/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10
+        )
+        if not resp.ok:
+            raise HTTPException(status_code=401, detail="Invalid Google token")
+        info = resp.json()
+    except requests.RequestException:
+        raise HTTPException(status_code=401, detail="Could not verify Google token")
+
+    google_id = info.get("id")
+    email = info.get("email")
+    name = info.get("name", "")
+    if not google_id or not email:
+        raise HTTPException(status_code=400, detail="Incomplete Google account data")
+
+    user = db.query(models.User).filter(models.User.google_id == google_id).first()
+    if not user:
+        user = db.query(models.User).filter(models.User.email == email).first()
+        if user:
+            user.google_id = google_id
+        else:
+            base = re.sub(r'[^a-z0-9_]', '', (name.lower().replace(' ', '_') or email.split('@')[0]))[:20] or 'user'
+            username = base
+            n = 1
+            while db.query(models.User).filter(models.User.username == username).first():
+                username = f"{base}{n}"; n += 1
+            user = models.User(email=email, username=username, google_id=google_id, hashed_password=None)
+            db.add(user)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Account conflict. Try logging in with email instead.")
+        db.refresh(user)
+
+    token = create_access_token(data={"sub": user.email})
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@app.post("/auth/phone/send-otp")
+def send_phone_otp(payload: dict = Body(...)):
+    phone = payload.get("phone", "").strip()
+    if not phone.startswith("+") or len(phone) < 8:
+        raise HTTPException(status_code=400, detail="Include country code, e.g. +12025551234")
+    if not TWILIO_SID or not TWILIO_TOKEN:
+        raise HTTPException(status_code=503, detail="Phone auth not configured")
+    otp = str(random.randint(100000, 999999))
+    _otp_store[phone] = {"otp": otp, "expires": datetime.utcnow() + timedelta(minutes=10)}
+    try:
+        from twilio.rest import Client
+        Client(TWILIO_SID, TWILIO_TOKEN).messages.create(
+            body=f"Your Skimsy code is {otp}. Valid for 10 minutes.",
+            from_=TWILIO_FROM,
+            to=phone
+        )
+    except Exception as e:
+        print(f"Twilio error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send verification code")
+    return {"message": "Code sent"}
+
+
+@app.post("/auth/phone/verify-otp")
+def verify_phone_otp(payload: dict = Body(...), db: Session = Depends(get_db)):
+    phone = payload.get("phone", "").strip()
+    otp = payload.get("otp", "").strip()
+    entry = _otp_store.get(phone)
+    if not entry or entry["otp"] != otp or datetime.utcnow() > entry["expires"]:
+        _otp_store.pop(phone, None)
+        raise HTTPException(status_code=401, detail="Invalid or expired code")
+    del _otp_store[phone]
+
+    user = db.query(models.User).filter(models.User.phone == phone).first()
+    if not user:
+        digits = re.sub(r'\D', '', phone)
+        base = f"user{digits[-4:]}"
+        username = base; n = 1
+        while db.query(models.User).filter(models.User.username == username).first():
+            username = f"{base}{n}"; n += 1
+        user = models.User(
+            email=f"phone_{digits}@skimsy.phone",
+            username=username,
+            phone=phone,
+            hashed_password=None
+        )
+        db.add(user)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            user = db.query(models.User).filter(models.User.phone == phone).first()
+        else:
+            db.refresh(user)
+
+    token = create_access_token(data={"sub": user.email})
+    return {"access_token": token, "token_type": "bearer"}
+
 
 # --- NEWS & FEED ENDPOINTS ---
 

@@ -9,7 +9,9 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
+    hashed_password = Column(String, nullable=True)
+    google_id = Column(String, unique=True, nullable=True, index=True)
+    phone = Column(String, unique=True, nullable=True, index=True)
     is_active = Column(Boolean, default=True)
 
     comments = relationship("Comment", back_populates="author")
