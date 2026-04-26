@@ -96,6 +96,27 @@ def _run_migrations():
         """))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_id ON users(google_id) WHERE google_id IS NOT NULL"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_phone ON users(phone) WHERE phone IS NOT NULL"))
+        for stmt in [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_until TIMESTAMP",
+            "ALTER TABLE user_posts ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE comments ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN DEFAULT FALSE",
+        ]:
+            try:
+                conn.execute(text(stmt))
+            except Exception:
+                pass
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS reports (
+                id SERIAL PRIMARY KEY,
+                reporter_id INTEGER NOT NULL REFERENCES users(id),
+                user_post_id INTEGER REFERENCES user_posts(id) ON DELETE CASCADE,
+                comment_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+                reason VARCHAR,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_report_user_post ON reports(reporter_id, user_post_id) WHERE user_post_id IS NOT NULL"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_report_comment ON reports(reporter_id, comment_id) WHERE comment_id IS NOT NULL"))
         conn.commit()
 
 _run_migrations()
@@ -2290,6 +2311,7 @@ def get_user_posts(
     )
 
     # Filters
+    query = query.filter(models.UserPost.is_hidden == False)
     filter_topic = category if category else topic
     if filter_topic and filter_topic != "All" and filter_topic != "":
         query = query.filter(models.UserPost.topic == filter_topic)
@@ -2308,9 +2330,22 @@ def get_user_posts(
 
     # Sorting
     if sort == "hot" or sort == "top":
-        # Sort by total votes (magnitude)
-        subquery = db.query(models.UserPostLike.user_post_id, func.count(models.UserPostLike.id).label('count')).group_by(models.UserPostLike.user_post_id).subquery()
-        query = query.outerjoin(subquery, models.UserPost.id == subquery.c.user_post_id).order_by(desc(func.coalesce(subquery.c.count, 0)))
+        vote_subq = db.query(
+            models.UserPostLike.user_post_id,
+            func.count(models.UserPostLike.id).label('count')
+        ).group_by(models.UserPostLike.user_post_id).subquery()
+        query = query.outerjoin(vote_subq, models.UserPost.id == vote_subq.c.user_post_id)
+
+        if sort == "hot" and current_user:
+            # Own posts float to the top; within own posts newest first, then by votes
+            own = case((models.UserPost.user_id == current_user.id, 1), else_=0)
+            query = query.order_by(
+                desc(own),
+                desc(models.UserPost.created_at),
+                desc(func.coalesce(vote_subq.c.count, 0)),
+            )
+        else:
+            query = query.order_by(desc(func.coalesce(vote_subq.c.count, 0)))
     else:
         query = query.order_by(desc(models.UserPost.created_at))
 
@@ -2357,8 +2392,68 @@ NSFW_DOMAINS = {
     'tnaflix.com', 'onlyfans.com', 'fansly.com', 'chaturbate.com', 'livejasmin.com',
     'cam4.com', 'stripchat.com', 'bongacams.com', 'myfreecams.com', 'camsoda.com',
     'brazzers.com', 'bangbros.com', 'realitykings.com', 'mofos.com', 'naughtyamerica.com',
-    'adultfriendfinder.com', 'ashleymadison.com',
+    'adultfriendfinder.com', 'ashleymadison.com', 'xtube.com', 'xart.com',
+    'hentaihaven.org', 'nhentai.net', 'rule34.xxx', 'gelbooru.com', 'danbooru.donmai.us',
+    'e621.net', 'furaffinity.net', 'literotica.com', 'sexstories.com',
+    'clips4sale.com', 'kink.com', 'manyvids.com', 'iwantclips.com', 'nubiles.net',
+    'passion.com', 'alt.com', 'fetlife.com', 'swappernet.com',
 }
+
+_NSFW_TERMS = {
+    'porn', 'pornography', 'xxx', 'nude', 'nudity', 'naked', 'nsfw',
+    'onlyfans', 'sex tape', 'sextape', 'sexting', 'camgirl', 'camboy',
+    'hentai', 'erotic', 'erotica',
+}
+
+def _contains_nsfw_text(text: str) -> bool:
+    low = text.lower()
+    return any(f' {t} ' in f' {low} ' or low.startswith(t + ' ') or low.endswith(' ' + t) or low == t for t in _NSFW_TERMS)
+
+REPORT_HIDE_THRESHOLD = 5    # reports on one piece of content → hidden
+BAN_1DAY_THRESHOLD = 3       # hidden items on a user → 24h ban
+BAN_1WEEK_THRESHOLD = 6      # hidden items on a user → 7d ban
+
+def _check_suspension(user: models.User):
+    if user.suspended_until and user.suspended_until > datetime.utcnow():
+        until = user.suspended_until.strftime('%b %d at %I:%M %p')
+        raise HTTPException(status_code=403, detail=f"Your account is suspended until {until} for violating community guidelines.")
+
+def _rate_limit_posts(user_id: int, db: Session):
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(hours=1)
+    count = db.query(models.UserPost).filter(
+        models.UserPost.user_id == user_id,
+        models.UserPost.created_at >= cutoff,
+    ).count()
+    if count >= 10:
+        raise HTTPException(status_code=429, detail="You're posting too fast. Please wait a bit before posting again.")
+
+def _rate_limit_comments(user_id: int, db: Session):
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(minutes=10)
+    count = db.query(models.Comment).filter(
+        models.Comment.user_id == user_id,
+        models.Comment.timestamp >= cutoff,
+    ).count()
+    if count >= 15:
+        raise HTTPException(status_code=429, detail="You're commenting too fast. Please slow down.")
+
+def _apply_reports_and_maybe_ban(target_user_id: int, db: Session):
+    """After hiding a piece of content, check if user should be suspended."""
+    from datetime import timedelta
+    hidden_count = (
+        db.query(models.UserPost).filter(models.UserPost.user_id == target_user_id, models.UserPost.is_hidden == True).count()
+        + db.query(models.Comment).filter(models.Comment.user_id == target_user_id, models.Comment.is_hidden == True).count()
+    )
+    user = db.query(models.User).filter(models.User.id == target_user_id).first()
+    if not user:
+        return
+    now = datetime.utcnow()
+    if hidden_count >= BAN_1WEEK_THRESHOLD:
+        user.suspended_until = now + timedelta(days=7)
+    elif hidden_count >= BAN_1DAY_THRESHOLD:
+        user.suspended_until = now + timedelta(days=1)
+    db.commit()
 
 @app.get("/link-preview")
 def get_link_preview(url: str):
@@ -2378,16 +2473,24 @@ def get_link_preview(url: str):
     try:
         resp = requests.get(
             url,
-            timeout=5,
-            headers={'User-Agent': 'Mozilla/5.0 (compatible; SkimsyBot/1.0)'},
+            timeout=10,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+            },
             allow_redirects=True
         )
+        if resp.status_code == 403:
+            raise HTTPException(status_code=400, detail="This site blocked the preview. Try copying the headline and URL manually.")
         resp.raise_for_status()
         content_type = resp.headers.get('content-type', '')
         if 'text/html' not in content_type:
             raise HTTPException(status_code=400, detail="URL does not point to a webpage")
+    except HTTPException:
+        raise
     except requests.RequestException:
-        raise HTTPException(status_code=400, detail="Could not fetch URL")
+        raise HTTPException(status_code=400, detail="Could not fetch URL — check your connection or try again.")
 
     soup = BeautifulSoup(resp.text, 'html.parser')
 
@@ -2429,6 +2532,22 @@ async def create_user_post(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    _check_suspension(current_user)
+    _rate_limit_posts(current_user.id, db)
+    if _contains_nsfw_text(content):
+        raise HTTPException(status_code=400, detail="Your post contains content that violates Skimsy's community guidelines.")
+    if link_title and _contains_nsfw_text(link_title):
+        raise HTTPException(status_code=400, detail="This link contains content that violates Skimsy's community guidelines.")
+    if link_url:
+        try:
+            lp = urlparse(link_url)
+            ld = lp.netloc.lower().lstrip('www.')
+            if any(ld == d or ld.endswith('.' + d) for d in NSFW_DOMAINS):
+                raise HTTPException(status_code=400, detail="This link is not allowed on Skimsy.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     image_path = image_url or None
     if image:
         upload_dir = "app/static/user_uploads"
@@ -2496,6 +2615,66 @@ def vote_user_post(
         "user_vote": final_user_vote
     }
 
+@app.post("/user-posts/{post_id}/report")
+def report_user_post(
+    post_id: int,
+    reason: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    post = db.query(models.UserPost).filter(models.UserPost.id == post_id).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="You cannot report your own post")
+    existing = db.execute(
+        text("SELECT id FROM reports WHERE reporter_id=:r AND user_post_id=:p"),
+        {"r": current_user.id, "p": post_id}
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="You already reported this post")
+    db.execute(
+        text("INSERT INTO reports (reporter_id, user_post_id, reason) VALUES (:r, :p, :reason)"),
+        {"r": current_user.id, "p": post_id, "reason": reason}
+    )
+    db.commit()
+    count = db.execute(text("SELECT COUNT(*) FROM reports WHERE user_post_id=:p"), {"p": post_id}).scalar()
+    if count >= REPORT_HIDE_THRESHOLD and not post.is_hidden:
+        post.is_hidden = True
+        db.commit()
+        _apply_reports_and_maybe_ban(post.user_id, db)
+    return {"status": "reported"}
+
+@app.post("/comments/{comment_id}/report")
+def report_comment(
+    comment_id: int,
+    reason: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    comment = db.query(models.Comment).filter(models.Comment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    if comment.user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="You cannot report your own comment")
+    existing = db.execute(
+        text("SELECT id FROM reports WHERE reporter_id=:r AND comment_id=:c"),
+        {"r": current_user.id, "c": comment_id}
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="You already reported this comment")
+    db.execute(
+        text("INSERT INTO reports (reporter_id, comment_id, reason) VALUES (:r, :c, :reason)"),
+        {"r": current_user.id, "c": comment_id, "reason": reason}
+    )
+    db.commit()
+    count = db.execute(text("SELECT COUNT(*) FROM reports WHERE comment_id=:c"), {"c": comment_id}).scalar()
+    if count >= REPORT_HIDE_THRESHOLD and not comment.is_hidden:
+        comment.is_hidden = True
+        db.commit()
+        _apply_reports_and_maybe_ban(comment.user_id, db)
+    return {"status": "reported"}
+
 # --- UPDATED: Create Comment (Handle both Post types) ---
 @app.post("/comments", response_model=schemas.Comment)
 async def create_comment(
@@ -2510,6 +2689,11 @@ async def create_comment(
     # 1. Validation: Must have at least one ID
     if not post_id and not user_post_id:
          raise HTTPException(status_code=400, detail="Must provide post_id or user_post_id")
+
+    _check_suspension(current_user)
+    _rate_limit_comments(current_user.id, db)
+    if _contains_nsfw_text(content):
+        raise HTTPException(status_code=400, detail="Your comment contains content that violates Skimsy's community guidelines.")
 
     # 2. Handle Image Upload
     image_path = None

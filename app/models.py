@@ -20,6 +20,7 @@ class User(Base):
     avatar_version = Column(Integer, default=1)
     checkin_count = Column(Integer, default=0)
     last_checkin = Column(Date, nullable=True)
+    suspended_until = Column(DateTime, nullable=True)
 
 class Post(Base):
     __tablename__ = "posts"
@@ -50,6 +51,7 @@ class UserPost(Base):
     link_title = Column(String, nullable=True)
     link_image = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    is_hidden = Column(Boolean, default=False)
 
     # Relationships
     author = relationship("User", backref="user_posts")
@@ -86,6 +88,7 @@ class Comment(Base):
     parent_id = Column(Integer, ForeignKey("comments.id"), nullable=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     is_edited = Column(Boolean, default=False)
+    is_hidden = Column(Boolean, default=False)
 
     author = relationship("User", back_populates="comments")
 
@@ -237,3 +240,13 @@ class Notification(Base):
     user = relationship("User", foreign_keys=[user_id], backref="notifications")
     sender = relationship("User", foreign_keys=[sender_id])
     post = relationship("Post")
+
+class Report(Base):
+    __tablename__ = "reports"
+    id = Column(Integer, primary_key=True, index=True)
+    reporter_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_post_id = Column(Integer, ForeignKey("user_posts.id"), nullable=True)
+    comment_id = Column(Integer, ForeignKey("comments.id"), nullable=True)
+    reason = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    reporter = relationship("User", foreign_keys=[reporter_id])
