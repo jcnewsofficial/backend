@@ -1314,6 +1314,19 @@ async def send_message(
     if not content and not image and not gif_url:
         raise HTTPException(status_code=400, detail="Message must have content or an image.")
 
+    _check_suspension(current_user)
+    _rate_limit_messages(current_user.id, db)
+    if content and _contains_nsfw_text(content):
+        raise HTTPException(status_code=400, detail="Your message contains inappropriate content.")
+    if gif_url:
+        try:
+            parsed_gif = urlparse(gif_url)
+            gif_domain = parsed_gif.netloc.lower().lstrip('www.')
+            if any(gif_domain == d or gif_domain.endswith('.' + d) for d in NSFW_DOMAINS):
+                raise HTTPException(status_code=400, detail="This link is not allowed.")
+        except HTTPException:
+            raise
+
     image_path = None
     if image:
         upload_dir = "app/static/message_images"
@@ -2438,6 +2451,16 @@ def _rate_limit_comments(user_id: int, db: Session):
     if count >= 15:
         raise HTTPException(status_code=429, detail="You're commenting too fast. Please slow down.")
 
+def _rate_limit_messages(user_id: int, db: Session):
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(minutes=10)
+    count = db.query(models.Message).filter(
+        models.Message.sender_id == user_id,
+        models.Message.timestamp >= cutoff,
+    ).count()
+    if count >= 50:
+        raise HTTPException(status_code=429, detail="You're sending messages too fast. Please slow down.")
+
 def _apply_reports_and_maybe_ban(target_user_id: int, db: Session):
     """After hiding a piece of content, check if user should be suspended."""
     from datetime import timedelta
@@ -2471,26 +2494,40 @@ def get_link_preview(url: str):
         raise HTTPException(status_code=400, detail="This link is not allowed")
 
     try:
-        resp = requests.get(
-            url,
-            timeout=10,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-            },
-            allow_redirects=True
-        )
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.google.com/',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+        })
+        resp = session.get(url, timeout=15, allow_redirects=True)
         if resp.status_code == 403:
             raise HTTPException(status_code=400, detail="This site blocked the preview. Try copying the headline and URL manually.")
-        resp.raise_for_status()
+        if resp.status_code == 429:
+            raise HTTPException(status_code=400, detail="This site is rate limiting previews. Try again in a moment.")
+        if resp.status_code == 401 or resp.status_code == 402:
+            raise HTTPException(status_code=400, detail="This article is behind a paywall.")
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=400, detail=f"Could not fetch URL — site returned {resp.status_code}.")
         content_type = resp.headers.get('content-type', '')
         if 'text/html' not in content_type:
             raise HTTPException(status_code=400, detail="URL does not point to a webpage")
     except HTTPException:
         raise
+    except requests.exceptions.ConnectionError:
+        raise HTTPException(status_code=400, detail="Could not reach this URL — the site may be down or the link is broken.")
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=400, detail="This site took too long to respond. Try again.")
     except requests.RequestException:
-        raise HTTPException(status_code=400, detail="Could not fetch URL — check your connection or try again.")
+        raise HTTPException(status_code=400, detail="Could not fetch URL — check that the link is valid.")
 
     soup = BeautifulSoup(resp.text, 'html.parser')
 
