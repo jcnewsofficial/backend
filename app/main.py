@@ -1839,6 +1839,25 @@ def accept_friend_request(
     db.commit()
     return {"status": "accepted"}
 
+@app.post("/friends/reject/{request_id}")
+def reject_friend_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    friendship = db.query(models.Friendship).filter(
+        models.Friendship.id == request_id,
+        models.Friendship.friend_id == current_user.id,
+        models.Friendship.status == 'pending'
+    ).first()
+
+    if not friendship:
+        raise HTTPException(status_code=404, detail="Friend request not found")
+
+    db.delete(friendship)
+    db.commit()
+    return {"status": "rejected"}
+
 @app.get("/friends/requests")
 def get_friend_requests(
     db: Session = Depends(get_db),
@@ -2076,6 +2095,30 @@ def get_my_activity(
             "preview": "",
             "user_post_id": n.user_post_id,
             "timestamp": n.timestamp.isoformat() if n.timestamp else ""
+        })
+
+    # Pending friend requests where I am the receiver
+    friend_reqs = db.query(models.Friendship).options(
+        joinedload(models.Friendship.requester)
+    ).filter(
+        models.Friendship.friend_id == current_user.id,
+        models.Friendship.status == 'pending'
+    ).order_by(models.Friendship.created_at.desc()).limit(20).all()
+
+    for req in friend_reqs:
+        if not req.requester:
+            continue
+        results.append({
+            "type": "friend_request",
+            "actor_username": req.requester.username,
+            "actor_avatar": req.requester.avatar_url,
+            "actor_avatar_version": req.requester.avatar_version or 1,
+            "actor_id": req.requester.id,
+            "text": "sent you a friend request",
+            "preview": "",
+            "user_post_id": None,
+            "request_id": req.id,
+            "timestamp": req.created_at.isoformat() if req.created_at else ""
         })
 
     results.sort(key=lambda x: x["timestamp"], reverse=True)
