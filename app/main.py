@@ -2478,9 +2478,139 @@ def _apply_reports_and_maybe_ban(target_user_id: int, db: Session):
         user.suspended_until = now + timedelta(days=1)
     db.commit()
 
+_CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+_GOOGLEBOT_UA = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+
+def _make_preview_session(ua: str) -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
+        'User-Agent': ua,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate',
+        'Referer': 'https://www.google.com/',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+    })
+    return s
+
+def _fetch_html(url: str) -> str:
+    """Fetch URL HTML, retrying with Googlebot on 401/403, and AMP fallback on title failure."""
+    last_status = None
+    for ua in [_CHROME_UA, _GOOGLEBOT_UA]:
+        try:
+            resp = _make_preview_session(ua).get(url, timeout=15, allow_redirects=True)
+            last_status = resp.status_code
+            if resp.status_code == 200:
+                if 'text/html' not in resp.headers.get('content-type', ''):
+                    raise HTTPException(status_code=400, detail="URL does not point to a webpage")
+                return resp.text
+            if resp.status_code in (401, 402):
+                # Don't retry — paywall is intentional
+                raise HTTPException(status_code=400, detail="This article is behind a paywall.")
+            if resp.status_code == 429:
+                raise HTTPException(status_code=400, detail="This site is rate limiting previews. Try again in a moment.")
+            # 403 or other 4xx: try next UA
+        except HTTPException:
+            raise
+        except requests.exceptions.ConnectionError:
+            raise HTTPException(status_code=400, detail="Could not reach this URL — the site may be down or the link is broken.")
+        except requests.exceptions.Timeout:
+            raise HTTPException(status_code=400, detail="This site took too long to respond. Try again.")
+        except requests.RequestException:
+            raise HTTPException(status_code=400, detail="Could not fetch URL — check that the link is valid.")
+
+    raise HTTPException(status_code=400, detail="This site blocked the preview. Try copying the headline and URL manually.")
+
+def _extract_title(soup) -> str | None:
+    import json as _json
+    # 1. Standard OG / Twitter / name meta
+    for attrs in [
+        {'property': 'og:title'},
+        {'name': 'twitter:title'},
+        {'name': 'title'},
+        {'itemprop': 'name'},
+    ]:
+        tag = soup.find('meta', attrs)
+        if tag and tag.get('content', '').strip():
+            return tag['content'].strip()
+    # 2. JSON-LD structured data (NewsArticle / Article)
+    for script in soup.find_all('script', {'type': 'application/ld+json'}):
+        try:
+            data = _json.loads(script.string or '')
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            if isinstance(data, dict):
+                # Handle @graph wrapper
+                nodes = data.get('@graph', [data])
+                for node in (nodes if isinstance(nodes, list) else [nodes]):
+                    if not isinstance(node, dict):
+                        continue
+                    t = node.get('headline') or node.get('name')
+                    if t and isinstance(t, str) and len(t) > 4:
+                        return t.strip()
+        except Exception:
+            continue
+    # 3. <title> tag
+    tag = soup.find('title')
+    if tag and tag.get_text().strip():
+        return tag.get_text().strip()
+    # 4. First <h1>
+    tag = soup.find('h1')
+    if tag and tag.get_text().strip():
+        return tag.get_text().strip()
+    return None
+
+def _extract_image(soup) -> str | None:
+    import json as _json
+    # 1. OG / Twitter meta
+    for attrs in [
+        {'property': 'og:image'},
+        {'property': 'og:image:url'},
+        {'name': 'twitter:image'},
+        {'name': 'twitter:image:src'},
+        {'itemprop': 'image'},
+    ]:
+        tag = soup.find('meta', attrs)
+        if tag and tag.get('content', '').strip():
+            return tag['content'].strip()
+    # 2. <link rel="image_src">
+    tag = soup.find('link', rel='image_src')
+    if tag and tag.get('href', '').strip():
+        return tag['href'].strip()
+    # 3. JSON-LD image
+    for script in soup.find_all('script', {'type': 'application/ld+json'}):
+        try:
+            data = _json.loads(script.string or '')
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            if isinstance(data, dict):
+                nodes = data.get('@graph', [data])
+                for node in (nodes if isinstance(nodes, list) else [nodes]):
+                    if not isinstance(node, dict):
+                        continue
+                    img = node.get('image')
+                    if isinstance(img, str) and img.startswith('http'):
+                        return img
+                    if isinstance(img, dict):
+                        u = img.get('url', '')
+                        if u.startswith('http'):
+                            return u
+                    if isinstance(img, list) and img:
+                        first = img[0]
+                        u = first.get('url', '') if isinstance(first, dict) else first
+                        if isinstance(u, str) and u.startswith('http'):
+                            return u
+        except Exception:
+            continue
+    return None
+
 @app.get("/link-preview")
 def get_link_preview(url: str):
-    # Validate URL format
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ('http', 'https') or not parsed.netloc:
@@ -2488,70 +2618,36 @@ def get_link_preview(url: str):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid URL")
 
-    # Check NSFW domains
     domain = parsed.netloc.lower().lstrip('www.')
     if any(domain == d or domain.endswith('.' + d) for d in NSFW_DOMAINS):
         raise HTTPException(status_code=400, detail="This link is not allowed")
 
-    try:
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',
-            'Referer': 'https://www.google.com/',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-        })
-        resp = session.get(url, timeout=15, allow_redirects=True)
-        if resp.status_code == 403:
-            raise HTTPException(status_code=400, detail="This site blocked the preview. Try copying the headline and URL manually.")
-        if resp.status_code == 429:
-            raise HTTPException(status_code=400, detail="This site is rate limiting previews. Try again in a moment.")
-        if resp.status_code == 401 or resp.status_code == 402:
-            raise HTTPException(status_code=400, detail="This article is behind a paywall.")
-        if resp.status_code >= 400:
-            raise HTTPException(status_code=400, detail=f"Could not fetch URL — site returned {resp.status_code}.")
-        content_type = resp.headers.get('content-type', '')
-        if 'text/html' not in content_type:
-            raise HTTPException(status_code=400, detail="URL does not point to a webpage")
-    except HTTPException:
-        raise
-    except requests.exceptions.ConnectionError:
-        raise HTTPException(status_code=400, detail="Could not reach this URL — the site may be down or the link is broken.")
-    except requests.exceptions.Timeout:
-        raise HTTPException(status_code=400, detail="This site took too long to respond. Try again.")
-    except requests.RequestException:
-        raise HTTPException(status_code=400, detail="Could not fetch URL — check that the link is valid.")
+    html = _fetch_html(url)
 
-    soup = BeautifulSoup(resp.text, 'html.parser')
+    # Detect Cloudflare JS challenge (returns 200 but is not real content)
+    if 'cf-browser-verification' in html or ('just a moment' in html[:2000].lower() and 'cloudflare' in html.lower()):
+        raise HTTPException(status_code=400, detail="This site requires browser verification. Try copying the headline and URL manually.")
 
-    # Title: og:title → twitter:title → <title>
-    title = None
-    for attr in [('property', 'og:title'), ('name', 'twitter:title')]:
-        tag = soup.find('meta', {attr[0]: attr[1]})
-        if tag and tag.get('content'):
-            title = tag['content'].strip()
-            break
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Try AMP version if main page has no usable title
+    title = _extract_title(soup)
+    image = _extract_image(soup)
+
     if not title:
-        title_tag = soup.find('title')
-        if title_tag:
-            title = title_tag.get_text().strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="Could not find article title")
+        amp_link = soup.find('link', rel='amphtml')
+        if amp_link and amp_link.get('href'):
+            try:
+                amp_html = _fetch_html(amp_link['href'])
+                amp_soup = BeautifulSoup(amp_html, 'html.parser')
+                title = _extract_title(amp_soup)
+                if not image:
+                    image = _extract_image(amp_soup)
+            except Exception:
+                pass
 
-    # Image: og:image → twitter:image
-    image = None
-    for attr in [('property', 'og:image'), ('name', 'twitter:image')]:
-        tag = soup.find('meta', {attr[0]: attr[1]})
-        if tag and tag.get('content'):
-            image = tag['content'].strip()
-            break
+    if not title:
+        raise HTTPException(status_code=400, detail="Could not find article title. The site may require a subscription or block previews.")
 
     return {"title": title[:200], "image": image, "url": url}
 
